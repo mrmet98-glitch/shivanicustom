@@ -93,6 +93,8 @@ On the Pages project:
 ]
 ```
 
+Paste the array itself as the value. Do not paste the variable name after the closing `]`, and use real line breaks (or keep the JSON on one line) rather than typing literal `\\n` sequences. The API also normalizes those two common copy/paste mistakes, but clean JSON is recommended.
+
 Use the exact passcodes from your project brief when entering this secret in Cloudflare. They are intentionally not committed into GitHub.
 
 ### 7. Redeploy
@@ -105,6 +107,8 @@ The first API request will:
 4. PBKDF2-hash each passcode with a unique salt and store only the hash in D1.
 
 After that, the bootstrap secret is no longer needed for normal logins, though leaving it configured is fine because bootstrapping runs only when the user table is empty.
+
+If login reports a server error, the message shown beneath the form includes the underlying setup problem. The most common causes are a missing D1 binding named exactly `DB`, configuring the binding or secret for Preview instead of Production, or not redeploying after changing the environment configuration. Do not hard-code usernames or passcodes into `public/` files: those files are delivered to every visitor.
 
 ## Local development (optional)
 

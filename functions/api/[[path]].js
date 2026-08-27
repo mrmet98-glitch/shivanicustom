@@ -14,6 +14,9 @@ const SESSION_DAYS = 14;
 
 export async function onRequest(context) {
   try {
+    if (!context.env.DB) {
+      throw new Error('D1 binding DB is missing. Add a D1 binding named DB to this Pages environment, then redeploy.');
+    }
     await ensureSchema(context.env.DB);
     await bootstrapUsers(context.env);
     return await route(context);
@@ -162,12 +165,7 @@ async function bootstrapUsers(env) {
   if (!env.BOOTSTRAP_USERS_JSON) {
     throw new Error('BOOTSTRAP_USERS_JSON secret is missing. Add it in Cloudflare Pages > Settings > Variables and Secrets.');
   }
-  let users;
-  try {
-    users = JSON.parse(env.BOOTSTRAP_USERS_JSON);
-  } catch {
-    throw new Error('BOOTSTRAP_USERS_JSON is not valid JSON.');
-  }
+  const users = parseBootstrapUsers(env.BOOTSTRAP_USERS_JSON);
   if (!Array.isArray(users) || users.length === 0) throw new Error('BOOTSTRAP_USERS_JSON must be a non-empty array.');
 
   const inserts = [];
@@ -181,6 +179,38 @@ async function bootstrapUsers(env) {
   }
   if (!inserts.length) throw new Error('No valid bootstrap users were found.');
   await env.DB.batch(inserts);
+}
+
+function parseBootstrapUsers(value) {
+  const original = String(value).trim();
+
+  try {
+    return JSON.parse(original);
+  } catch {
+    // Try the two common dashboard copy/paste mistakes below before reporting
+    // a configuration error.
+  }
+
+  // Secret dashboards sometimes preserve pasted escape sequences instead of
+  // turning them into whitespace. JSON permits whitespace between tokens, but
+  // a literal "\\n" between tokens is invalid, so support that common paste.
+  let normalized = original.replace(/\\[nrt]/g, (escape) => ({
+    '\\n': '\n',
+    '\\r': '\r',
+    '\\t': '\t',
+  })[escape]);
+
+  // Also tolerate the variable name accidentally being pasted after the JSON.
+  normalized = normalized.replace(/BOOTSTRAP_USERS_JSON\s*$/, '').trim();
+
+  try {
+    return JSON.parse(normalized);
+  } catch (error) {
+    throw new Error(
+      `BOOTSTRAP_USERS_JSON is not valid JSON (${error.message}). ` +
+      'Paste only the JSON array as the secret value; do not include the variable name.'
+    );
+  }
 }
 
 async function login(request, env) {

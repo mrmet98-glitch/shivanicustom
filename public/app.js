@@ -19,7 +19,13 @@ async function api(url, options={}){
   const data = ct.includes('application/json') ? await res.json() : await res.text();
   if(!res.ok){
     if(res.status===401 && url!='/api/login'){ state.user=null; renderLogin(); }
-    throw new Error(data?.error || data?.detail || data || `Request failed (${res.status})`);
+    // Server responses include a generic error plus a useful configuration
+    // detail. Prefer the detail for 5xx responses so setup problems are visible
+    // on the login screen instead of being reduced to just "Server error".
+    const message = res.status>=500 && data?.detail
+      ? data.detail
+      : data?.error || data?.detail || data || `Request failed (${res.status})`;
+    throw new Error(message);
   }
   return data;
 }
