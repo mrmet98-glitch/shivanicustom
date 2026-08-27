@@ -515,7 +515,7 @@ function randomHex(bytes) {
 async function hashPasscode(passcode, salt) {
   const enc = new TextEncoder();
   const material = await crypto.subtle.importKey('raw', enc.encode(passcode), 'PBKDF2', false, ['deriveBits']);
-  const bits = await crypto.subtle.deriveBits({ name:'PBKDF2', hash:'SHA-256', salt:enc.encode(salt), iterations:160000 }, material, 256);
+  const bits = await crypto.subtle.deriveBits({ name:'PBKDF2', hash:'SHA-256', salt:enc.encode(salt), iterations:100000 }, material, 256);
   return [...new Uint8Array(bits)].map(b => b.toString(16).padStart(2,'0')).join('');
 }
 function timingSafeEqual(a,b) {
