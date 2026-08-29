@@ -87,7 +87,7 @@ async function renderProject(id){
     app.innerHTML=shell(`
       <div class="crumb" id="backDash">← Back to projects</div>
       <div class="project-head"><div><div class="eyebrow">${esc(p.project_type||'Custom Jewelry Project')}</div><h1>${esc(p.name)}</h1><div class="muted">Created ${dateFmt(p.created_at)}${p.client_reference?` · Ref ${esc(p.client_reference)}`:''}</div></div>
-      <div style="display:flex;gap:9px;flex-wrap:wrap">${isAdmin?'<button id="editProjectBtn" class="btn btn-ghost">Edit Project</button><button id="addDesignBtn" class="btn btn-primary">+ Add Proposal</button>':`<span class="status">${esc(p.status)}</span>`}</div></div>
+      <div style="display:flex;gap:9px;flex-wrap:wrap">${isAdmin?'<button id="deleteProjectBtn" class="btn btn-danger">Delete Project</button><button id="editProjectBtn" class="btn btn-ghost">Edit Project</button><button id="addDesignBtn" class="btn btn-primary">+ Add Proposal</button>':`<span class="status">${esc(p.status)}</span>`}</div></div>
 
       <section class="panel"><div class="panel-title"><h2>Project Progress</h2>${isAdmin?statusSelect(p):''}</div>${tracker(p.status)}</section>
 
@@ -123,7 +123,8 @@ function bindProjectEvents(project, designs){
   if(state.user.role==='admin'){
     document.querySelector('#addDesignBtn').onclick=()=>openDesignModal(project.id);
     document.querySelector('#editProjectBtn').onclick=()=>openEditProjectModal(project);
-    document.querySelector('#statusSelect').onchange=async(e)=>{const v=e.target.value;e.target.disabled=true;try{await api(`/api/projects/${project.id}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:v})});toast('Project status updated');renderProject(project.id)}catch(err){toast(err.message)}finally{e.target.disabled=false}};
+    document.querySelector('#deleteProjectBtn').onclick=async()=>{if(!confirm(`Permanently delete “${project.name}” and all of its proposals, comments, and files? This cannot be undone.`))return;const btn=document.querySelector('#deleteProjectBtn');btn.disabled=true;try{const r=await api(`/api/projects/${encodeURIComponent(project.id)}`,{method:'DELETE'});location.hash='';toast(r.storage_warning?'Project deleted, but some stored files could not be cleaned up.':'Project deleted');await renderDashboard()}catch(err){toast(err.message);btn.disabled=false}};
+    document.querySelector('#statusSelect').onchange=async(e)=>{const v=e.target.value;e.target.disabled=true;try{const r=await api(`/api/projects/${project.id}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:v})});toast(notificationMessage('Project status updated',r));renderProject(project.id)}catch(err){toast(err.message)}finally{e.target.disabled=false}};
   }
   document.querySelectorAll('[data-toggle-design]').forEach(el=>el.onclick=async()=>{
     const id=el.dataset.toggleDesign, box=document.querySelector(`#design-detail-${id}`);
@@ -154,8 +155,8 @@ function commentHtml(c){return `<div class="comment ${c.role}"><div class="comme
 
 function bindDesignDetailEvents(d,box){
   box.querySelectorAll('[data-thumb-src]').forEach(t=>t.onclick=()=>{box.querySelector('.js-main-image').src=t.dataset.thumbSrc});
-  const form=box.querySelector('[data-comment-form]'); if(form) form.onsubmit=async e=>{e.preventDefault();const ta=form.querySelector('textarea'),btn=form.querySelector('button');btn.disabled=true;try{await api(`/api/designs/${d.id}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:ta.value})});toast('Comment added');await loadDesignDetail(d.id,box)}catch(err){toast(err.message)}finally{btn.disabled=false}};
-  const approve=box.querySelector('[data-approve]'); if(approve) approve.onclick=async()=>{if(!confirm(`Approve “${d.title}” as the production design?`))return;approve.disabled=true;try{await api(`/api/designs/${d.id}/approve`,{method:'POST'});toast('Design approved');await renderProject(d.project_id)}catch(err){toast(err.message);approve.disabled=false}};
+  const form=box.querySelector('[data-comment-form]'); if(form) form.onsubmit=async e=>{e.preventDefault();const ta=form.querySelector('textarea'),btn=form.querySelector('button');btn.disabled=true;try{const r=await api(`/api/designs/${d.id}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:ta.value})});toast(notificationMessage('Comment added',r));await loadDesignDetail(d.id,box)}catch(err){toast(err.message)}finally{btn.disabled=false}};
+  const approve=box.querySelector('[data-approve]'); if(approve) approve.onclick=async()=>{if(!confirm(`Approve “${d.title}” as the production design?`))return;approve.disabled=true;try{const r=await api(`/api/designs/${d.id}/approve`,{method:'POST'});toast(notificationMessage('Design approved',r));await renderProject(d.project_id)}catch(err){toast(err.message);approve.disabled=false}};
   bindLightbox(box);
 }
 
@@ -193,7 +194,7 @@ function openDesignModal(projectId){
     <input type="hidden" name="diamonds" id="diamondsJson"><div class="modal-actions span-2"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary" type="submit">Add Proposal</button></div></form>`);
   const rows=document.querySelector('#diamondRows');document.querySelector('#addDiamondRow').onclick=()=>addDiamondRow(rows);addDiamondRow(rows);
   const copySource=document.querySelector('#copyDiamondSource');if(copySource)copySource.onchange=async()=>{if(!copySource.value)return;copySource.disabled=true;try{const r=await api(`/api/designs/${encodeURIComponent(copySource.value)}`);rows.innerHTML='';(r.design.diamonds||[]).forEach(d=>addDiamondRow(rows,d));if(!(r.design.diamonds||[]).length)addDiamondRow(rows);toast('Diamond info copied')}catch(err){toast(err.message)}finally{copySource.disabled=false;copySource.value=''}};
-  document.querySelector('#designForm').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget;const diamonds=[...rows.querySelectorAll('.diamond-row')].map(row=>Object.fromEntries(new FormData(row))).map(d=>({...d,stone_count:Number(d.stone_count||1),weight_ct:d.weight_ct===''?null:Number(d.weight_ct)}));form.querySelector('#diamondsJson').value=JSON.stringify(diamonds);const btn=form.querySelector('[type=submit]');btn.disabled=true;try{await api(`/api/projects/${projectId}/designs`,{method:'POST',body:new FormData(form)});closeModal();toast('Proposal added');renderProject(projectId)}catch(err){toast(err.message);btn.disabled=false}};
+  document.querySelector('#designForm').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget;const diamonds=[...rows.querySelectorAll('.diamond-row')].map(row=>Object.fromEntries(new FormData(row))).map(d=>({...d,stone_count:Number(d.stone_count||1),weight_ct:d.weight_ct===''?null:Number(d.weight_ct)}));form.querySelector('#diamondsJson').value=JSON.stringify(diamonds);const btn=form.querySelector('[type=submit]');btn.disabled=true;try{const r=await api(`/api/projects/${projectId}/designs`,{method:'POST',body:new FormData(form)});closeModal();toast(notificationMessage('Proposal added',r));renderProject(projectId)}catch(err){toast(err.message);btn.disabled=false}};
 }
 
 function addDiamondRow(parent,values={}){
@@ -214,7 +215,8 @@ function closeModal(){document.querySelector('#modalBackdrop')?.remove()}
 function bindTopbar(){document.querySelector('#logoutBtn')?.addEventListener('click',async()=>{await api('/api/logout',{method:'POST'}).catch(()=>{});state.user=null;location.hash='';renderLogin()})}
 function imageTag(f,alt){return `<img src="/api/files/${f.id}" alt="${escAttr(alt)}" data-lightbox="/api/files/${f.id}">`}
 function bindLightbox(root=document){root.querySelectorAll('[data-lightbox],.gallery img').forEach(img=>img.onclick=()=>{const src=img.dataset.lightbox||img.src;const l=document.createElement('div');l.className='lightbox';l.innerHTML=`<img src="${src}">`;l.onclick=()=>l.remove();document.body.appendChild(l)})}
-function toast(msg){toastEl.textContent=msg;toastEl.classList.add('show');clearTimeout(window.__toastT);window.__toastT=setTimeout(()=>toastEl.classList.remove('show'),2600)}
+function toast(msg){toastEl.textContent=msg;toastEl.classList.add('show');clearTimeout(window.__toastT);window.__toastT=setTimeout(()=>toastEl.classList.remove('show'),String(msg).includes('HubSpot failed')?10000:2600)}
+function notificationMessage(success,response){return response?.notification_warning?`${success}, but HubSpot failed: ${response.notification_warning}`:success}
 function money(cents){return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format((Number(cents)||0)/100)}
 function priceHtml(d){return `<div class="price-wrap"><div class="price">${Number(d.has_price)===0?'Quote pending':money(d.price_cents)}</div>${Number(d.has_price)!==0&&Number(d.price_includes_diamonds)===1?'<div class="price-note">Includes Shivani-provided diamonds</div>':''}</div>`}
 function num(n,d=2){return Number(n||0).toFixed(d).replace(/\.?0+$/,'')}

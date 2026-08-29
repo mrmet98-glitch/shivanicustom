@@ -13,6 +13,7 @@ Single-customer custom jewelry collaboration portal built for Cloudflare Pages +
 - See and respond to customer comments on every proposal.
 - Leave proposal pricing blank while a quote is pending, flag prices that include Shivani-provided diamonds, and copy diamond lines from another proposal in the same project.
 - Record each diamond line as Natural, Lab Grown, or unspecified.
+- Permanently delete a project and its associated proposals, comments, database file records, and private R2 uploads.
 
 ### Customer
 - Dashboard of project cards with project name, creation date, proposal count, requested delivery date, and current status.
@@ -161,3 +162,5 @@ PORTAL_URL=https://shivanicustom.pages.dev
 ```
 
 Notification delivery is best-effort: HubSpot failures are logged but do not undo a successfully saved comment, proposal, approval, or status update. The HubSpot form must contain fields matching the `portal_*` internal property names used by the API, and its workflow must allow re-enrollment for every submission.
+
+When HubSpot rejects a submission, the portal shows the rejection beneath the successful action for ten seconds. This distinguishes delivery/configuration failures from workflow problems: if no warning appears, check the HubSpot form's submission history and workflow enrollment history; if a warning appears, its response text identifies the field or form setting HubSpot rejected.

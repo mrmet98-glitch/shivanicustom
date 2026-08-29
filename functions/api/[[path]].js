@@ -56,6 +56,7 @@ async function route(context) {
     const projectId = parts[1];
     if (parts.length === 2 && method === 'GET') return getProject(env.DB, user, projectId);
     if (parts.length === 2 && method === 'PATCH') return updateProject(request, env.DB, user, projectId);
+    if (parts.length === 2 && method === 'DELETE') return deleteProject(env, user, projectId);
     if (parts[2] === 'status' && method === 'PATCH') return updateProjectStatus(request, env, user, projectId);
     if (parts[2] === 'designs' && method === 'POST') return createDesign(request, env, user, projectId);
   }
@@ -351,6 +352,28 @@ async function updateProject(request, db, user, projectId) {
   return json({ ok: true });
 }
 
+async function deleteProject(env, user, projectId) {
+  if (user.role !== 'admin') return forbidden();
+  const project = await env.DB.prepare('SELECT id,name FROM projects WHERE id=?').bind(projectId).first();
+  if (!project) return json({ error: 'Project not found.' }, 404);
+
+  const files = await env.DB.prepare('SELECT object_key FROM files WHERE project_id=?').bind(projectId).all();
+  await env.DB.prepare('DELETE FROM projects WHERE id=?').bind(projectId).run();
+
+  let storageWarning = null;
+  try {
+    const keys = (files.results || []).map((file) => file.object_key);
+    if (keys.length) await env.UPLOADS.delete(keys);
+  } catch (error) {
+    // The project is already deleted; report orphan cleanup failure without
+    // incorrectly telling the administrator that the deletion itself failed.
+    console.error('Project upload cleanup error', error);
+    storageWarning = error?.message || String(error);
+  }
+
+  return json({ ok: true, project: { id: project.id, name: project.name }, storage_warning: storageWarning });
+}
+
 async function updateProjectStatus(request, env, user, projectId) {
   if (user.role !== 'admin') return forbidden();
   const body = await readJson(request);
@@ -360,11 +383,11 @@ async function updateProjectStatus(request, env, user, projectId) {
   const result = await env.DB.prepare('UPDATE projects SET status=?, updated_at=? WHERE id=?')
     .bind(body.status, new Date().toISOString(), projectId).run();
   if (!result.meta?.changes) return json({ error: 'Project not found.' }, 404);
-  await notifyHubSpot(env, {
+  const notificationWarning = await notifyHubSpot(env, {
     eventType: 'status_updated', projectId, projectName: project.name,
     actorName: user.display_name, actorRole: user.role, projectStatus: body.status,
   });
-  return json({ ok: true, status: body.status });
+  return json({ ok: true, status: body.status, notification_warning: notificationWarning });
 }
 
 async function createDesign(request, env, user, projectId) {
@@ -411,12 +434,12 @@ async function createDesign(request, env, user, projectId) {
     throw e;
   }
 
-  await notifyHubSpot(env, {
+  const notificationWarning = await notifyHubSpot(env, {
     eventType: 'design_created', projectId, projectName: project.name,
     designId: id, designTitle: title, actorName: user.display_name, actorRole: user.role,
   });
 
-  return json({ design: await designDetail(env.DB, id) }, 201);
+  return json({ design: await designDetail(env.DB, id), notification_warning: notificationWarning }, 201);
 }
 
 async function getProject(db, user, projectId) {
@@ -469,11 +492,11 @@ async function addComment(request, env, user, designId) {
   const id = crypto.randomUUID();
   await env.DB.prepare('INSERT INTO comments (id,design_id,user_id,body) VALUES (?,?,?,?)').bind(id,designId,user.id,comment).run();
   const row = await env.DB.prepare(`SELECT c.id,c.body,c.created_at,u.display_name,u.role FROM comments c JOIN users u ON u.id=c.user_id WHERE c.id=?`).bind(id).first();
-  await notifyHubSpot(env, {
+  const notificationWarning = await notifyHubSpot(env, {
     eventType: 'comment_created', projectId: exists.project_id, projectName: exists.project_name,
     designId, designTitle: exists.title, actorName: user.display_name, actorRole: user.role, message: comment,
   });
-  return json({ comment: row }, 201);
+  return json({ comment: row, notification_warning: notificationWarning }, 201);
 }
 
 async function approveDesign(env, user, designId) {
@@ -487,12 +510,12 @@ async function approveDesign(env, user, designId) {
     env.DB.prepare('UPDATE designs SET approved=1, updated_at=? WHERE id=?').bind(now,designId),
     env.DB.prepare('UPDATE projects SET approved_design_id=?, status=?, updated_at=? WHERE id=?').bind(designId,'Project Approved',now,d.project_id),
   ]);
-  await notifyHubSpot(env, {
+  const notificationWarning = await notifyHubSpot(env, {
     eventType: 'design_approved', projectId: d.project_id, projectName: d.project_name,
     designId, designTitle: d.title, actorName: user.display_name, actorRole: user.role,
     projectStatus: 'Project Approved',
   });
-  return json({ ok: true, project_id: d.project_id, status: 'Project Approved' });
+  return json({ ok: true, project_id: d.project_id, status: 'Project Approved', notification_warning: notificationWarning });
 }
 
 async function serveFile(env, user, fileId) {
@@ -568,10 +591,12 @@ async function notifyHubSpot(env, event) {
       const detail = await response.text();
       throw new Error(`HubSpot form submission failed (${response.status}): ${detail.slice(0, 500)}`);
     }
+    return null;
   } catch (error) {
     // Notifications must never roll back a successful portal action. Cloudflare
     // logs retain the failure so the HubSpot configuration can be corrected.
     console.error('HubSpot notification error', error);
+    return error?.message || String(error);
   }
 }
 
