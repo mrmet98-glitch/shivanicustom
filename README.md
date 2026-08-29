@@ -11,6 +11,8 @@ Single-customer custom jewelry collaboration portal built for Cloudflare Pages +
 - Diamond lines support Shape, Weight, whether weight is total or per-stone, # Stones, Color/Clarity, Measurements.
 - Manual status control across: Project Received → Designs Generated → Designs In Review → Project Approved → In Production → Shivani Gems QC → Shipped → Delivered. The only automatic status change is customer approval → Project Approved.
 - See and respond to customer comments on every proposal.
+- Leave proposal pricing blank while a quote is pending, flag prices that include Shivani-provided diamonds, and copy diamond lines from another proposal in the same project.
+- Record each diamond line as Natural, Lab Grown, or unspecified.
 
 ### Customer
 - Dashboard of project cards with project name, creation date, proposal count, requested delivery date, and current status.
@@ -136,7 +138,7 @@ Then use Wrangler Pages dev with local D1/R2 bindings. For production deployment
 - Internal project notes are stripped from the customer API response.
 
 ## V1 intentionally not included yet
-- Email notifications / HubSpot / Gmail notifications
+- Gmail-specific notification integration (notifications use HubSpot instead)
 - Multiple customer organizations/accounts
 - Password reset flow
 - Fine-grained audit history / notification center
@@ -144,3 +146,18 @@ Then use Wrangler Pages dev with local D1/R2 bindings. For production deployment
 - Production invoice/payment handling
 
 Those are good V2 additions once the single-customer workflow is validated.
+
+## HubSpot notifications
+
+The API submits portal events to the HubSpot form for portal `45715522`, form `3799d2a4-7876-4b70-9c14-054dcff947c2`, using `doug@uniqjewelry.com` as the enrolled contact. The supported event types are `design_created`, `comment_created`, `design_approved`, and `status_updated`. HubSpot workflows remain responsible for branching and sending customer or internal emails.
+
+The defaults can be changed without a code edit by adding any of these Cloudflare environment variables and redeploying:
+
+```dotenv
+HUBSPOT_PORTAL_ID=45715522
+HUBSPOT_FORM_ID=3799d2a4-7876-4b70-9c14-054dcff947c2
+HUBSPOT_CUSTOMER_EMAIL=doug@uniqjewelry.com
+PORTAL_URL=https://shivanicustom.pages.dev
+```
+
+Notification delivery is best-effort: HubSpot failures are logged but do not undo a successfully saved comment, proposal, approval, or status update. The HubSpot form must contain fields matching the `portal_*` internal property names used by the API, and its workflow must allow re-enrollment for every submission.

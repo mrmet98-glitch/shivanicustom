@@ -11,6 +11,10 @@ const STATUS_STEPS = [
 
 const SESSION_COOKIE = 'sg_session';
 const SESSION_DAYS = 14;
+const HUBSPOT_PORTAL_ID = '45715522';
+const HUBSPOT_FORM_ID = '3799d2a4-7876-4b70-9c14-054dcff947c2';
+const DEFAULT_CUSTOMER_EMAIL = 'doug@uniqjewelry.com';
+const DEFAULT_PORTAL_URL = 'https://shivanicustom.pages.dev';
 
 export async function onRequest(context) {
   try {
@@ -52,15 +56,15 @@ async function route(context) {
     const projectId = parts[1];
     if (parts.length === 2 && method === 'GET') return getProject(env.DB, user, projectId);
     if (parts.length === 2 && method === 'PATCH') return updateProject(request, env.DB, user, projectId);
-    if (parts[2] === 'status' && method === 'PATCH') return updateProjectStatus(request, env.DB, user, projectId);
+    if (parts[2] === 'status' && method === 'PATCH') return updateProjectStatus(request, env, user, projectId);
     if (parts[2] === 'designs' && method === 'POST') return createDesign(request, env, user, projectId);
   }
 
   if (parts[0] === 'designs' && parts[1]) {
     const designId = parts[1];
     if (parts.length === 2 && method === 'GET') return getDesign(env.DB, user, designId);
-    if (parts[2] === 'comments' && method === 'POST') return addComment(request, env.DB, user, designId);
-    if (parts[2] === 'approve' && method === 'POST') return approveDesign(env.DB, user, designId);
+    if (parts[2] === 'comments' && method === 'POST') return addComment(request, env, user, designId);
+    if (parts[2] === 'approve' && method === 'POST') return approveDesign(env, user, designId);
   }
 
   if (parts[0] === 'files' && parts[1] && method === 'GET') {
@@ -111,6 +115,8 @@ async function ensureSchema(db) {
       description TEXT,
       metal TEXT,
       price_cents INTEGER NOT NULL DEFAULT 0,
+      has_price INTEGER NOT NULL DEFAULT 1,
+      price_includes_diamonds INTEGER NOT NULL DEFAULT 0,
       approved INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -124,6 +130,7 @@ async function ensureSchema(db) {
       weight_mode TEXT NOT NULL DEFAULT 'total' CHECK(weight_mode IN ('total','each')),
       stone_count INTEGER NOT NULL DEFAULT 1,
       color_clarity TEXT,
+      diamond_origin TEXT NOT NULL DEFAULT '',
       measurements TEXT,
       sort_order INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY(design_id) REFERENCES designs(id) ON DELETE CASCADE
@@ -157,6 +164,23 @@ async function ensureSchema(db) {
     `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
   ];
   await db.batch(statements.map((s) => db.prepare(s)));
+  await ensureColumn(db, 'designs', 'has_price', 'INTEGER NOT NULL DEFAULT 1');
+  await ensureColumn(db, 'designs', 'price_includes_diamonds', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn(db, 'diamond_lines', 'diamond_origin', "TEXT NOT NULL DEFAULT ''");
+}
+
+async function ensureColumn(db, table, column, definition) {
+  const info = await db.prepare(`PRAGMA table_info(${table})`).all();
+  if (!(info.results || []).some((entry) => entry.name === column)) {
+    try {
+      await db.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
+    } catch (error) {
+      // Concurrent first requests may both observe the old schema. Only ignore
+      // the race when another request successfully added this exact column.
+      const refreshed = await db.prepare(`PRAGMA table_info(${table})`).all();
+      if (!(refreshed.results || []).some((entry) => entry.name === column)) throw error;
+    }
+  }
 }
 
 async function bootstrapUsers(env) {
@@ -327,27 +351,36 @@ async function updateProject(request, db, user, projectId) {
   return json({ ok: true });
 }
 
-async function updateProjectStatus(request, db, user, projectId) {
+async function updateProjectStatus(request, env, user, projectId) {
   if (user.role !== 'admin') return forbidden();
   const body = await readJson(request);
   if (!STATUS_STEPS.includes(body.status)) return json({ error: 'Invalid status.' }, 400);
-  const result = await db.prepare('UPDATE projects SET status=?, updated_at=? WHERE id=?')
+  const project = await env.DB.prepare('SELECT id,name FROM projects WHERE id=?').bind(projectId).first();
+  if (!project) return json({ error: 'Project not found.' }, 404);
+  const result = await env.DB.prepare('UPDATE projects SET status=?, updated_at=? WHERE id=?')
     .bind(body.status, new Date().toISOString(), projectId).run();
   if (!result.meta?.changes) return json({ error: 'Project not found.' }, 404);
+  await notifyHubSpot(env, {
+    eventType: 'status_updated', projectId, projectName: project.name,
+    actorName: user.display_name, actorRole: user.role, projectStatus: body.status,
+  });
   return json({ ok: true, status: body.status });
 }
 
 async function createDesign(request, env, user, projectId) {
   if (user.role !== 'admin') return forbidden();
-  const project = await env.DB.prepare('SELECT id FROM projects WHERE id=?').bind(projectId).first();
+  const project = await env.DB.prepare('SELECT id,name FROM projects WHERE id=?').bind(projectId).first();
   if (!project) return json({ error: 'Project not found.' }, 404);
 
   const form = await request.formData();
   const title = text(form, 'title') || `Design ${Date.now()}`;
   const metal = text(form, 'metal');
   const description = text(form, 'description');
-  const price = Number(form.get('price') || 0);
+  const priceRaw = text(form, 'price');
+  const hasPrice = priceRaw !== '';
+  const price = hasPrice ? Number(priceRaw) : 0;
   if (!Number.isFinite(price) || price < 0) return json({ error: 'Price must be a valid positive amount.' }, 400);
+  const priceIncludesDiamonds = hasPrice && form.get('price_includes_diamonds') === 'on';
 
   let diamonds = [];
   const diamondsRaw = text(form, 'diamonds');
@@ -358,17 +391,18 @@ async function createDesign(request, env, user, projectId) {
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  await env.DB.prepare(`INSERT INTO designs (id,project_id,title,description,metal,price_cents,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?)`)
-    .bind(id, projectId, title, description, metal, Math.round(price * 100), now, now).run();
+  await env.DB.prepare(`INSERT INTO designs (id,project_id,title,description,metal,price_cents,has_price,price_includes_diamonds,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .bind(id, projectId, title, description, metal, Math.round(price * 100), hasPrice ? 1 : 0, priceIncludesDiamonds ? 1 : 0, now, now).run();
 
   try {
     const diamondStatements = diamonds
       .filter(d => d && (d.shape || d.weight_ct || d.stone_count || d.color_clarity || d.measurements))
       .map((d, i) => env.DB.prepare(`INSERT INTO diamond_lines
-        (id,design_id,shape,weight_ct,weight_mode,stone_count,color_clarity,measurements,sort_order)
-        VALUES (?,?,?,?,?,?,?,?,?)`)
+        (id,design_id,shape,weight_ct,weight_mode,stone_count,color_clarity,diamond_origin,measurements,sort_order)
+        VALUES (?,?,?,?,?,?,?,?,?,?)`)
         .bind(crypto.randomUUID(), id, String(d.shape || ''), numberOrNull(d.weight_ct), d.weight_mode === 'each' ? 'each' : 'total',
-          Math.max(1, parseInt(d.stone_count || 1, 10)), String(d.color_clarity || ''), String(d.measurements || ''), i));
+          Math.max(1, parseInt(d.stone_count || 1, 10)), String(d.color_clarity || ''),
+          ['Natural', 'Lab Grown'].includes(d.diamond_origin) ? d.diamond_origin : '', String(d.measurements || ''), i));
     if (diamondStatements.length) await env.DB.batch(diamondStatements);
     await saveUploads(env, form.getAll('design_images'), { projectId, designId: id, kind: 'design' });
     await env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(now,projectId).run();
@@ -376,6 +410,11 @@ async function createDesign(request, env, user, projectId) {
     await env.DB.prepare('DELETE FROM designs WHERE id=?').bind(id).run();
     throw e;
   }
+
+  await notifyHubSpot(env, {
+    eventType: 'design_created', projectId, projectName: project.name,
+    designId: id, designTitle: title, actorName: user.display_name, actorRole: user.role,
+  });
 
   return json({ design: await designDetail(env.DB, id) }, 201);
 }
@@ -419,29 +458,40 @@ async function designDetail(db, designId) {
   return design;
 }
 
-async function addComment(request, db, user, designId) {
-  const exists = await db.prepare('SELECT id FROM designs WHERE id=?').bind(designId).first();
+async function addComment(request, env, user, designId) {
+  const exists = await env.DB.prepare(`SELECT d.id,d.title,d.project_id,p.name AS project_name
+    FROM designs d JOIN projects p ON p.id=d.project_id WHERE d.id=?`).bind(designId).first();
   if (!exists) return json({ error: 'Design not found.' }, 404);
   const body = await readJson(request);
   const comment = String(body.body || '').trim();
   if (!comment) return json({ error: 'Comment cannot be empty.' }, 400);
   if (comment.length > 5000) return json({ error: 'Comment is too long.' }, 400);
   const id = crypto.randomUUID();
-  await db.prepare('INSERT INTO comments (id,design_id,user_id,body) VALUES (?,?,?,?)').bind(id,designId,user.id,comment).run();
-  const row = await db.prepare(`SELECT c.id,c.body,c.created_at,u.display_name,u.role FROM comments c JOIN users u ON u.id=c.user_id WHERE c.id=?`).bind(id).first();
+  await env.DB.prepare('INSERT INTO comments (id,design_id,user_id,body) VALUES (?,?,?,?)').bind(id,designId,user.id,comment).run();
+  const row = await env.DB.prepare(`SELECT c.id,c.body,c.created_at,u.display_name,u.role FROM comments c JOIN users u ON u.id=c.user_id WHERE c.id=?`).bind(id).first();
+  await notifyHubSpot(env, {
+    eventType: 'comment_created', projectId: exists.project_id, projectName: exists.project_name,
+    designId, designTitle: exists.title, actorName: user.display_name, actorRole: user.role, message: comment,
+  });
   return json({ comment: row }, 201);
 }
 
-async function approveDesign(db, user, designId) {
+async function approveDesign(env, user, designId) {
   if (user.role !== 'customer') return json({ error: 'Only the customer can approve a design.' }, 403);
-  const d = await db.prepare('SELECT id, project_id FROM designs WHERE id=?').bind(designId).first();
+  const d = await env.DB.prepare(`SELECT d.id,d.title,d.project_id,p.name AS project_name
+    FROM designs d JOIN projects p ON p.id=d.project_id WHERE d.id=?`).bind(designId).first();
   if (!d) return json({ error: 'Design not found.' }, 404);
   const now = new Date().toISOString();
-  await db.batch([
-    db.prepare('UPDATE designs SET approved=0, updated_at=? WHERE project_id=?').bind(now,d.project_id),
-    db.prepare('UPDATE designs SET approved=1, updated_at=? WHERE id=?').bind(now,designId),
-    db.prepare('UPDATE projects SET approved_design_id=?, status=?, updated_at=? WHERE id=?').bind(designId,'Project Approved',now,d.project_id),
+  await env.DB.batch([
+    env.DB.prepare('UPDATE designs SET approved=0, updated_at=? WHERE project_id=?').bind(now,d.project_id),
+    env.DB.prepare('UPDATE designs SET approved=1, updated_at=? WHERE id=?').bind(now,designId),
+    env.DB.prepare('UPDATE projects SET approved_design_id=?, status=?, updated_at=? WHERE id=?').bind(designId,'Project Approved',now,d.project_id),
   ]);
+  await notifyHubSpot(env, {
+    eventType: 'design_approved', projectId: d.project_id, projectName: d.project_name,
+    designId, designTitle: d.title, actorName: user.display_name, actorRole: user.role,
+    projectStatus: 'Project Approved',
+  });
   return json({ ok: true, project_id: d.project_id, status: 'Project Approved' });
 }
 
@@ -478,6 +528,50 @@ async function saveUploads(env, files, { projectId, designId, kind }) {
       await env.UPLOADS.delete(objectKey);
       throw e;
     }
+  }
+}
+
+async function notifyHubSpot(env, event) {
+  const portalId = env.HUBSPOT_PORTAL_ID || HUBSPOT_PORTAL_ID;
+  const formId = env.HUBSPOT_FORM_ID || HUBSPOT_FORM_ID;
+  const customerEmail = env.HUBSPOT_CUSTOMER_EMAIL || DEFAULT_CUSTOMER_EMAIL;
+  const siteUrl = String(env.PORTAL_URL || DEFAULT_PORTAL_URL).replace(/\/$/, '');
+  const projectUrl = `${siteUrl}/#/project/${encodeURIComponent(event.projectId)}`;
+  const values = {
+    email: customerEmail,
+    portal_event_type: event.eventType,
+    portal_event_id: crypto.randomUUID(),
+    portal_project_id: event.projectId,
+    portal_project_name: event.projectName,
+    portal_design_id: event.designId,
+    portal_design_title: event.designTitle,
+    portal_actor_name: event.actorName,
+    portal_actor_role: event.actorRole,
+    portal_message: event.message,
+    portal_project_status: event.projectStatus,
+    portal_url: projectUrl,
+  };
+  const fields = Object.entries(values)
+    .filter(([, value]) => value !== undefined && value !== null && value !== '')
+    .map(([name, value]) => ({ name, value: String(value) }));
+
+  try {
+    const response = await fetch(`https://api.hsforms.com/submissions/v3/integration/submit/${portalId}/${formId}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        fields,
+        context: { pageUri: projectUrl, pageName: event.projectName || 'Custom Project Portal' },
+      }),
+    });
+    if (!response.ok) {
+      const detail = await response.text();
+      throw new Error(`HubSpot form submission failed (${response.status}): ${detail.slice(0, 500)}`);
+    }
+  } catch (error) {
+    // Notifications must never roll back a successful portal action. Cloudflare
+    // logs retain the failure so the HubSpot configuration can be corrected.
+    console.error('HubSpot notification error', error);
   }
 }
 
