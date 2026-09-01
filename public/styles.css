@@ -28,3 +28,9 @@ button,input,textarea,select{font:inherit}.hidden{display:none!important}.muted{
 .lightbox{position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:80;display:grid;place-items:center;padding:25px;cursor:zoom-out}.lightbox img{max-width:95vw;max-height:92vh;object-fit:contain}
 @media(max-width:950px){.grid{grid-template-columns:repeat(2,1fr)}.project-specs{grid-template-columns:repeat(2,1fr)}.diamond-row{grid-template-columns:1fr 1fr}.diamond-row .icon-btn{grid-column:2;justify-self:end}.detail-grid{grid-template-columns:1fr}.design-images{grid-template-columns:1fr}.side-thumbs{grid-template-columns:repeat(4,1fr)}}
 @media(max-width:650px){.topbar{padding:0 16px}.brandtext span{display:none}.container{padding:26px 15px 55px}.hero,.project-head{align-items:flex-start;flex-direction:column}.hero h1,.project-head h1{font-size:31px}.grid{grid-template-columns:1fr}.form-grid,.project-specs{grid-template-columns:1fr}.span-2{grid-column:span 1}.design-summary{grid-template-columns:90px 1fr}.design-summary .price-wrap{grid-column:2;text-align:left}.design-summary .price{font-size:20px}.thumb{width:90px;height:90px}.gallery{grid-template-columns:repeat(2,1fr)}.userpill{display:none}.modal{padding:18px}}
+
+/* Proposal quote and findings additions */
+.field .check-label.quote-check{font-size:14px;line-height:1.35}
+.finding-row{display:grid;grid-template-columns:2fr 1fr 1fr auto;gap:8px;align-items:end;padding:10px;border:1px solid var(--line);border-radius:10px;background:rgba(5,18,33,.25)}
+.line-heading{margin:18px 0 10px}.findings-heading{margin:22px 0 8px}
+@media(max-width:950px){.finding-row{grid-template-columns:1fr 1fr}.finding-row .icon-btn{grid-column:2;justify-self:end}}

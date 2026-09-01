@@ -7,11 +7,12 @@ Single-customer custom jewelry collaboration portal built for Cloudflare Pages +
 ### Admin
 - Create projects with name, project type, client/PO reference, requested delivery date, metal, size/dimensions, full brief, supplied stones/materials, internal notes, and multiple reference images.
 - Add multiple design proposals inside each project.
-- Each proposal supports multiple images, free-text metal, finished-piece price, customer-facing notes, and unlimited diamond lines.
+- Each proposal supports multiple images, free-text metal, finished-piece price, customer-facing notes, unlimited diamond lines, and finding lines for chains, earring backs, or other components.
 - Diamond lines support Shape, Weight, whether weight is total or per-stone, # Stones, Color/Clarity, Measurements.
 - Manual status control across: Project Received → Designs Generated → Designs In Review → Project Approved → In Production → Shivani Gems QC → Shipped → Delivered. The only automatic status change is customer approval → Project Approved.
-- See and respond to customer comments on every proposal.
-- Leave proposal pricing blank while a quote is pending, flag prices that include Shivani-provided diamonds, and copy diamond lines from another proposal in the same project.
+- See and respond to customer comments on every proposal, with comment times displayed in each viewer's browser-local time.
+- Leave proposal pricing blank while a quote is pending, separately flag prices that include Shivani-provided diamonds or chain/findings, and copy diamond lines from another proposal in the same project.
+- Edit any proposal after creation, including the approved proposal, without disturbing its approval state.
 - Record each diamond line as Natural, Lab Grown, or unspecified.
 - Permanently delete a project and its associated proposals, comments, database file records, and private R2 uploads.
 
@@ -143,7 +144,7 @@ Then use Wrangler Pages dev with local D1/R2 bindings. For production deployment
 - Multiple customer organizations/accounts
 - Password reset flow
 - Fine-grained audit history / notification center
-- Proposal editing/deletion UI
+- Proposal deletion UI
 - Production invoice/payment handling
 
 Those are good V2 additions once the single-customer workflow is validated.

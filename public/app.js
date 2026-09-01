@@ -143,20 +143,22 @@ async function loadDesignDetail(id,box){
 }
 
 function designDetailHtml(d){
-  const files=d.files||[], diamonds=d.diamonds||[], isCustomer=state.user.role==='customer';
+  const files=d.files||[], diamonds=d.diamonds||[], findings=d.findings||[], isCustomer=state.user.role==='customer', isAdmin=state.user.role==='admin';
   return `${files.length?`<div class="design-images"><img class="main-image js-main-image" src="/api/files/${files[0].id}" alt="${escAttr(d.title)}"><div class="side-thumbs">${files.map(f=>`<img src="/api/files/${f.id}" data-thumb-src="/api/files/${f.id}" alt="${escAttr(f.filename)}">`).join('')}</div></div>`:''}
     <div class="detail-grid"><div><div class="eyebrow">Proposal Details</div>${d.description?`<div class="copy" style="margin:8px 0 15px">${esc(d.description)}</div>`:''}
       <div class="project-specs" style="grid-template-columns:1fr 1fr;margin-bottom:16px">${spec('Metal',d.metal)}${spec('Total Diamond Weight',`${num(d.total_ctw,2)} ctw`)}</div>
       ${diamonds.length?`<table class="diamond-table"><thead><tr><th>Shape</th><th>Weight</th><th>#</th><th>Color / Clarity</th><th>Origin</th><th>Measurements</th></tr></thead><tbody>${diamonds.map(x=>`<tr><td>${esc(x.shape||'—')}</td><td>${x.weight_ct==null?'—':`${num(x.weight_ct,3)} ct${x.weight_mode==='each'?' ea.':''}`}</td><td>${x.stone_count||1}</td><td>${esc(x.color_clarity||'—')}</td><td>${esc(x.diamond_origin||'—')}</td><td>${esc(x.measurements||'—')}</td></tr>`).join('')}</tbody></table>`:'<div class="muted">No diamond lines entered.</div>'}
+      <div class="eyebrow findings-heading">Findings</div>${findings.length?`<table class="diamond-table"><thead><tr><th>Description</th><th>Type</th><th>Metal</th></tr></thead><tbody>${findings.map(x=>`<tr><td>${esc(x.description||'—')}</td><td>${esc(x.finding_type||'Other')}</td><td>${esc(x.metal||'—')}</td></tr>`).join('')}</tbody></table>`:'<div class="muted">No findings entered.</div>'}
     </div><div><div class="eyebrow">Discussion</div><div class="comments" style="margin-top:9px">${(d.comments||[]).length?d.comments.map(commentHtml).join(''):'<div class="muted">No comments yet.</div>'}</div><form class="comment-form" data-comment-form="${d.id}"><textarea placeholder="Add an edit request, question or response…" required></textarea><button class="btn btn-ghost btn-small" type="submit">Send</button></form>
-    ${isCustomer&&!d.approved?`<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)"><button class="btn btn-primary" data-approve="${d.id}">Approve This Design</button><div class="helper">Approval will mark the project approved and make this the selected production design.</div></div>`:''}${d.approved?'<div style="margin-top:14px;color:#b8e4c9;font-weight:800">✓ This design is approved for the project.</div>':''}</div></div>`;
+    ${isAdmin?`<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)"><button class="btn btn-ghost btn-small" data-edit-design="${d.id}">Edit Proposal</button><div class="helper">Approved proposals can also be edited.</div></div>`:''}${isCustomer&&!d.approved?`<div style="margin-top:16px;padding-top:14px;border-top:1px solid var(--line)"><button class="btn btn-primary" data-approve="${d.id}">Approve This Design</button><div class="helper">Approval will mark the project approved and make this the selected production design.</div></div>`:''}${d.approved?'<div style="margin-top:14px;color:#b8e4c9;font-weight:800">✓ This design is approved for the project.</div>':''}</div></div>`;
 }
-function commentHtml(c){return `<div class="comment ${c.role}"><div class="comment-head"><strong>${esc(c.display_name)}</strong><span>${dateFmt(c.created_at)}</span></div><p>${esc(c.body)}</p></div>`}
+function commentHtml(c){return `<div class="comment ${c.role}"><div class="comment-head"><strong>${esc(c.display_name)}</strong><span>${dateTimeFmt(c.created_at)}</span></div><p>${esc(c.body)}</p></div>`}
 
 function bindDesignDetailEvents(d,box){
   box.querySelectorAll('[data-thumb-src]').forEach(t=>t.onclick=()=>{box.querySelector('.js-main-image').src=t.dataset.thumbSrc});
   const form=box.querySelector('[data-comment-form]'); if(form) form.onsubmit=async e=>{e.preventDefault();const ta=form.querySelector('textarea'),btn=form.querySelector('button');btn.disabled=true;try{const r=await api(`/api/designs/${d.id}/comments`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({body:ta.value})});toast(notificationMessage('Comment added',r));await loadDesignDetail(d.id,box)}catch(err){toast(err.message)}finally{btn.disabled=false}};
   const approve=box.querySelector('[data-approve]'); if(approve) approve.onclick=async()=>{if(!confirm(`Approve “${d.title}” as the production design?`))return;approve.disabled=true;try{const r=await api(`/api/designs/${d.id}/approve`,{method:'POST'});toast(notificationMessage('Design approved',r));await renderProject(d.project_id)}catch(err){toast(err.message);approve.disabled=false}};
+  const edit=box.querySelector('[data-edit-design]'); if(edit) edit.onclick=()=>openEditDesignModal(d);
   bindLightbox(box);
 }
 
@@ -182,19 +184,33 @@ function openEditProjectModal(p){
 }
 
 function openDesignModal(projectId){
-  const existingDesigns=(state.currentProject?.designs||[]).filter(d=>d.id);
-  openModal(`<div class="modal-head"><h2>Add Design Proposal</h2><button class="btn btn-ghost btn-small" data-close>Close</button></div><form id="designForm" class="form-grid">
-    ${input('Proposal Name','title',true,'e.g. Design A — East-West Bezel')}${input('Metal','metal',false,'Free text')}${input('Finished Piece Price','price',false,'Leave blank if quote is pending','number')}
-    <div class="field"><label class="check-label"><input type="checkbox" name="price_includes_diamonds"> Quote includes Shivani-provided diamonds</label><div class="helper">Shown beneath the price to the customer.</div></div>
-    <div class="field span-2"><label>Proposal Notes</label><textarea name="description" placeholder="Customer-facing notes about this design"></textarea></div>
-    <div class="field span-2"><label>Design Images</label><input type="file" name="design_images" multiple required accept="image/*,.png,.PNG,.jpg,.JPG,.jpeg,.JPEG,.webp,.WEBP"><div class="helper">The first image becomes the card thumbnail. Add multiple views/renders if needed.</div></div>
-    <div class="span-2"><div class="panel-title" style="margin:8px 0"><div><div class="eyebrow">Diamond Information</div></div><button type="button" id="addDiamondRow" class="btn btn-ghost btn-small">+ Add Diamond Line</button></div>
-      ${existingDesigns.length?`<div class="field copy-diamonds"><label>Copy diamond info from another proposal</label><select id="copyDiamondSource"><option value="">Choose a proposal…</option>${existingDesigns.map(d=>`<option value="${escAttr(d.id)}">${esc(d.title)}</option>`).join('')}</select><div class="helper">This replaces the diamond rows below; you can edit them before saving.</div></div>`:''}
-      <div id="diamondRows" class="form-stack"></div></div>
-    <input type="hidden" name="diamonds" id="diamondsJson"><div class="modal-actions span-2"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary" type="submit">Add Proposal</button></div></form>`);
-  const rows=document.querySelector('#diamondRows');document.querySelector('#addDiamondRow').onclick=()=>addDiamondRow(rows);addDiamondRow(rows);
-  const copySource=document.querySelector('#copyDiamondSource');if(copySource)copySource.onchange=async()=>{if(!copySource.value)return;copySource.disabled=true;try{const r=await api(`/api/designs/${encodeURIComponent(copySource.value)}`);rows.innerHTML='';(r.design.diamonds||[]).forEach(d=>addDiamondRow(rows,d));if(!(r.design.diamonds||[]).length)addDiamondRow(rows);toast('Diamond info copied')}catch(err){toast(err.message)}finally{copySource.disabled=false;copySource.value=''}};
-  document.querySelector('#designForm').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget;const diamonds=[...rows.querySelectorAll('.diamond-row')].map(row=>Object.fromEntries(new FormData(row))).map(d=>({...d,stone_count:Number(d.stone_count||1),weight_ct:d.weight_ct===''?null:Number(d.weight_ct)}));form.querySelector('#diamondsJson').value=JSON.stringify(diamonds);const btn=form.querySelector('[type=submit]');btn.disabled=true;try{const r=await api(`/api/projects/${projectId}/designs`,{method:'POST',body:new FormData(form)});closeModal();toast(notificationMessage('Proposal added',r));renderProject(projectId)}catch(err){toast(err.message);btn.disabled=false}};
+  openProposalModal({projectId});
+}
+
+function openEditDesignModal(design){
+  openProposalModal({projectId:design.project_id,design});
+}
+
+function openProposalModal({projectId,design=null}){
+  const editing=!!design, d=design||{}, existingDesigns=(state.currentProject?.designs||[]).filter(x=>x.id&&x.id!==d.id);
+  openModal(`<div class="modal-head"><h2>${editing?'Edit':'Add'} Design Proposal</h2><button class="btn btn-ghost btn-small" data-close>Close</button></div><form id="designForm" class="form-grid">
+    ${input('Proposal Name','title',true,'e.g. Design A — East-West Bezel','text',d.title)}${input('Metal','metal',false,'Free text','text',d.metal)}${input('Finished Piece Price','price',false,'Leave blank if quote is pending','number',Number(d.has_price)===0?'':editing?(Number(d.price_cents)||0)/100:'')}
+    <div class="field"><label class="check-label quote-check"><input type="checkbox" name="price_includes_diamonds" ${Number(d.price_includes_diamonds)===1?'checked':''}> Quote includes Shivani-provided diamonds</label><label class="check-label quote-check"><input type="checkbox" name="price_includes_findings" ${Number(d.price_includes_findings)===1?'checked':''}> Quote includes cost of chain/findings</label><div class="helper">Shown beneath the price to the customer.</div></div>
+    <div class="field span-2"><label>Proposal Notes</label><textarea name="description" placeholder="Customer-facing notes about this design">${esc(d.description||'')}</textarea></div>
+    <div class="field span-2"><label>${editing?'Add ':''}Design Images</label><input type="file" name="design_images" multiple ${editing?'':'required'} accept="image/*,.png,.PNG,.jpg,.JPG,.jpeg,.JPEG,.webp,.WEBP"><div class="helper">${editing?'Existing images remain; selected images are added.':'The first image becomes the card thumbnail.'}</div></div>
+    <div class="span-2"><div class="panel-title line-heading"><div class="eyebrow">Diamond Information</div><button type="button" id="addDiamondRow" class="btn btn-ghost btn-small">+ Add Diamond Line</button></div>
+      ${!editing&&existingDesigns.length?`<div class="field copy-diamonds"><label>Copy diamond info from another proposal</label><select id="copyDiamondSource"><option value="">Choose a proposal…</option>${existingDesigns.map(x=>`<option value="${escAttr(x.id)}">${esc(x.title)}</option>`).join('')}</select></div>`:''}<div id="diamondRows" class="form-stack"></div></div>
+    <div class="span-2"><div class="panel-title line-heading"><div class="eyebrow">Findings</div><button type="button" id="addFindingRow" class="btn btn-ghost btn-small">+ Add Finding</button></div><div id="findingRows" class="form-stack"></div></div>
+    <input type="hidden" name="diamonds" id="diamondsJson"><input type="hidden" name="findings" id="findingsJson"><div class="modal-actions span-2"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary" type="submit">${editing?'Save Changes':'Add Proposal'}</button></div></form>`);
+  const rows=document.querySelector('#diamondRows'), findingRows=document.querySelector('#findingRows');
+  (d.diamonds||[{}]).forEach(x=>addDiamondRow(rows,x)); (d.findings||[{}]).forEach(x=>addFindingRow(findingRows,x));
+  document.querySelector('#addDiamondRow').onclick=()=>addDiamondRow(rows); document.querySelector('#addFindingRow').onclick=()=>addFindingRow(findingRows);
+  const copySource=document.querySelector('#copyDiamondSource');if(copySource)copySource.onchange=async()=>{if(!copySource.value)return;try{const r=await api(`/api/designs/${encodeURIComponent(copySource.value)}`);rows.innerHTML='';(r.design.diamonds||[{}]).forEach(x=>addDiamondRow(rows,x));toast('Diamond info copied')}catch(err){toast(err.message)}finally{copySource.value=''}};
+  document.querySelector('#designForm').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget;const diamonds=[...rows.querySelectorAll('.diamond-row')].map(row=>Object.fromEntries(new FormData(row))).map(x=>({...x,stone_count:Number(x.stone_count||1),weight_ct:x.weight_ct===''?null:Number(x.weight_ct)}));const findings=[...findingRows.querySelectorAll('.finding-row')].map(row=>Object.fromEntries(new FormData(row)));form.querySelector('#diamondsJson').value=JSON.stringify(diamonds);form.querySelector('#findingsJson').value=JSON.stringify(findings);const btn=form.querySelector('[type=submit]');btn.disabled=true;try{await api(editing?`/api/designs/${d.id}`:`/api/projects/${projectId}/designs`,{method:editing?'PATCH':'POST',body:new FormData(form)});closeModal();toast(editing?'Proposal updated':'Proposal added');renderProject(projectId)}catch(err){toast(err.message);btn.disabled=false}};
+}
+
+function addFindingRow(parent,values={}){
+  const row=document.createElement('form');row.className='finding-row';row.innerHTML=`${mini('Description','description','Main finding details','text',values.description)}<div class="field"><label>Type</label><select name="finding_type">${['Chain','Earring Backs','Other'].map(x=>`<option ${values.finding_type===x?'selected':''}>${x}</option>`).join('')}</select></div>${mini('Metal','metal','e.g. 14K Yellow Gold','text',values.metal)}<button type="button" class="icon-btn" title="Remove">×</button>`;row.querySelector('.icon-btn').onclick=()=>row.remove();parent.appendChild(row)
 }
 
 function addDiamondRow(parent,values={}){
@@ -218,9 +234,10 @@ function bindLightbox(root=document){root.querySelectorAll('[data-lightbox],.gal
 function toast(msg){toastEl.textContent=msg;toastEl.classList.add('show');clearTimeout(window.__toastT);window.__toastT=setTimeout(()=>toastEl.classList.remove('show'),String(msg).includes('HubSpot failed')?10000:2600)}
 function notificationMessage(success,response){return response?.notification_warning?`${success}, but HubSpot failed: ${response.notification_warning}`:success}
 function money(cents){return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format((Number(cents)||0)/100)}
-function priceHtml(d){return `<div class="price-wrap"><div class="price">${Number(d.has_price)===0?'Quote pending':money(d.price_cents)}</div>${Number(d.has_price)!==0&&Number(d.price_includes_diamonds)===1?'<div class="price-note">Includes Shivani-provided diamonds</div>':''}</div>`}
+function priceHtml(d){return `<div class="price-wrap"><div class="price">${Number(d.has_price)===0?'Quote pending':money(d.price_cents)}</div>${Number(d.has_price)!==0&&Number(d.price_includes_diamonds)===1?'<div class="price-note">Includes Shivani-provided diamonds</div>':''}${Number(d.has_price)!==0&&Number(d.price_includes_findings)===1?'<div class="price-note">Includes cost of chain/findings</div>':''}</div>`}
 function num(n,d=2){return Number(n||0).toFixed(d).replace(/\.?0+$/,'')}
 function dateFmt(s){if(!s)return'—';const d=new Date(s.endsWith?.('Z')||s.includes('T')?s:s.replace(' ','T')+'Z');return Number.isNaN(d)?s:new Intl.DateTimeFormat('en-US',{month:'short',day:'numeric',year:'numeric'}).format(d)}
+function dateTimeFmt(s){if(!s)return'—';const d=new Date(s.endsWith?.('Z')||s.includes('T')?s:s.replace(' ','T')+'Z');return Number.isNaN(d)?s:new Intl.DateTimeFormat(undefined,{month:'short',day:'numeric',year:'numeric',hour:'numeric',minute:'2-digit'}).format(d)}
 function dateOnly(s){if(!s)return'—';const [y,m,d]=String(s).slice(0,10).split('-').map(Number);return new Intl.DateTimeFormat('en-US',{month:'short',day:'numeric',year:'numeric'}).format(new Date(y,m-1,d))}
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[c]))}
 function escAttr(v){return esc(v).replace(/`/g,'&#096;')}

@@ -64,6 +64,7 @@ async function route(context) {
   if (parts[0] === 'designs' && parts[1]) {
     const designId = parts[1];
     if (parts.length === 2 && method === 'GET') return getDesign(env.DB, user, designId);
+    if (parts.length === 2 && method === 'PATCH') return updateDesign(request, env, user, designId);
     if (parts[2] === 'comments' && method === 'POST') return addComment(request, env, user, designId);
     if (parts[2] === 'approve' && method === 'POST') return approveDesign(env, user, designId);
   }
@@ -118,6 +119,7 @@ async function ensureSchema(db) {
       price_cents INTEGER NOT NULL DEFAULT 0,
       has_price INTEGER NOT NULL DEFAULT 1,
       price_includes_diamonds INTEGER NOT NULL DEFAULT 0,
+      price_includes_findings INTEGER NOT NULL DEFAULT 0,
       approved INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -133,6 +135,15 @@ async function ensureSchema(db) {
       color_clarity TEXT,
       diamond_origin TEXT NOT NULL DEFAULT '',
       measurements TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      FOREIGN KEY(design_id) REFERENCES designs(id) ON DELETE CASCADE
+    )`,
+    `CREATE TABLE IF NOT EXISTS finding_lines (
+      id TEXT PRIMARY KEY,
+      design_id TEXT NOT NULL,
+      description TEXT,
+      finding_type TEXT NOT NULL DEFAULT 'Other',
+      metal TEXT,
       sort_order INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY(design_id) REFERENCES designs(id) ON DELETE CASCADE
     )`,
@@ -162,11 +173,13 @@ async function ensureSchema(db) {
     `CREATE INDEX IF NOT EXISTS idx_files_project ON files(project_id)`,
     `CREATE INDEX IF NOT EXISTS idx_files_design ON files(design_id)`,
     `CREATE INDEX IF NOT EXISTS idx_comments_design ON comments(design_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_findings_design ON finding_lines(design_id)`,
     `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
   ];
   await db.batch(statements.map((s) => db.prepare(s)));
   await ensureColumn(db, 'designs', 'has_price', 'INTEGER NOT NULL DEFAULT 1');
   await ensureColumn(db, 'designs', 'price_includes_diamonds', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn(db, 'designs', 'price_includes_findings', 'INTEGER NOT NULL DEFAULT 0');
   await ensureColumn(db, 'diamond_lines', 'diamond_origin', "TEXT NOT NULL DEFAULT ''");
 }
 
@@ -404,6 +417,7 @@ async function createDesign(request, env, user, projectId) {
   const price = hasPrice ? Number(priceRaw) : 0;
   if (!Number.isFinite(price) || price < 0) return json({ error: 'Price must be a valid positive amount.' }, 400);
   const priceIncludesDiamonds = hasPrice && form.get('price_includes_diamonds') === 'on';
+  const priceIncludesFindings = hasPrice && form.get('price_includes_findings') === 'on';
 
   let diamonds = [];
   const diamondsRaw = text(form, 'diamonds');
@@ -411,11 +425,14 @@ async function createDesign(request, env, user, projectId) {
     try { diamonds = JSON.parse(diamondsRaw); } catch { return json({ error: 'Diamond info is invalid.' }, 400); }
   }
   if (!Array.isArray(diamonds)) return json({ error: 'Diamond info must be an array.' }, 400);
+  let findings = [];
+  try { findings = JSON.parse(text(form, 'findings') || '[]'); } catch { return json({ error: 'Findings info is invalid.' }, 400); }
+  if (!Array.isArray(findings)) return json({ error: 'Findings info must be an array.' }, 400);
 
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
-  await env.DB.prepare(`INSERT INTO designs (id,project_id,title,description,metal,price_cents,has_price,price_includes_diamonds,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .bind(id, projectId, title, description, metal, Math.round(price * 100), hasPrice ? 1 : 0, priceIncludesDiamonds ? 1 : 0, now, now).run();
+  await env.DB.prepare(`INSERT INTO designs (id,project_id,title,description,metal,price_cents,has_price,price_includes_diamonds,price_includes_findings,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(id, projectId, title, description, metal, Math.round(price * 100), hasPrice ? 1 : 0, priceIncludesDiamonds ? 1 : 0, priceIncludesFindings ? 1 : 0, now, now).run();
 
   try {
     const diamondStatements = diamonds
@@ -427,6 +444,7 @@ async function createDesign(request, env, user, projectId) {
           Math.max(1, parseInt(d.stone_count || 1, 10)), String(d.color_clarity || ''),
           ['Natural', 'Lab Grown'].includes(d.diamond_origin) ? d.diamond_origin : '', String(d.measurements || ''), i));
     if (diamondStatements.length) await env.DB.batch(diamondStatements);
+    await replaceFindings(env.DB, id, findings, false);
     await saveUploads(env, form.getAll('design_images'), { projectId, designId: id, kind: 'design' });
     await env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(now,projectId).run();
   } catch (e) {
@@ -440,6 +458,42 @@ async function createDesign(request, env, user, projectId) {
   });
 
   return json({ design: await designDetail(env.DB, id), notification_warning: notificationWarning }, 201);
+}
+
+async function updateDesign(request, env, user, designId) {
+  if (user.role !== 'admin') return forbidden();
+  const existing = await env.DB.prepare('SELECT id,project_id FROM designs WHERE id=?').bind(designId).first();
+  if (!existing) return json({ error: 'Design not found.' }, 404);
+  const form = await request.formData();
+  const title = text(form, 'title');
+  if (!title) return json({ error: 'Proposal name is required.' }, 400);
+  const priceRaw = text(form, 'price'), hasPrice = priceRaw !== '', price = hasPrice ? Number(priceRaw) : 0;
+  if (!Number.isFinite(price) || price < 0) return json({ error: 'Price must be a valid positive amount.' }, 400);
+  let diamonds, findings;
+  try { diamonds = JSON.parse(text(form, 'diamonds') || '[]'); findings = JSON.parse(text(form, 'findings') || '[]'); }
+  catch { return json({ error: 'Proposal line information is invalid.' }, 400); }
+  if (!Array.isArray(diamonds) || !Array.isArray(findings)) return json({ error: 'Proposal lines must be arrays.' }, 400);
+  const now = new Date().toISOString();
+  await env.DB.prepare(`UPDATE designs SET title=?,description=?,metal=?,price_cents=?,has_price=?,price_includes_diamonds=?,price_includes_findings=?,updated_at=? WHERE id=?`)
+    .bind(title, text(form, 'description'), text(form, 'metal'), Math.round(price * 100), hasPrice ? 1 : 0,
+      hasPrice && form.get('price_includes_diamonds') === 'on' ? 1 : 0, hasPrice && form.get('price_includes_findings') === 'on' ? 1 : 0, now, designId).run();
+  await env.DB.prepare('DELETE FROM diamond_lines WHERE design_id=?').bind(designId).run();
+  const diamondStatements = diamonds.filter(d => d && (d.shape || d.weight_ct || d.color_clarity || d.measurements)).map((d, i) => env.DB.prepare(`INSERT INTO diamond_lines
+    (id,design_id,shape,weight_ct,weight_mode,stone_count,color_clarity,diamond_origin,measurements,sort_order) VALUES (?,?,?,?,?,?,?,?,?,?)`)
+    .bind(crypto.randomUUID(), designId, String(d.shape || ''), numberOrNull(d.weight_ct), d.weight_mode === 'each' ? 'each' : 'total', Math.max(1, parseInt(d.stone_count || 1, 10)), String(d.color_clarity || ''), ['Natural','Lab Grown'].includes(d.diamond_origin) ? d.diamond_origin : '', String(d.measurements || ''), i));
+  if (diamondStatements.length) await env.DB.batch(diamondStatements);
+  await replaceFindings(env.DB, designId, findings, true);
+  await saveUploads(env, form.getAll('design_images'), { projectId: existing.project_id, designId, kind: 'design' });
+  await env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(now, existing.project_id).run();
+  return json({ design: await designDetail(env.DB, designId) });
+}
+
+async function replaceFindings(db, designId, findings, removeExisting) {
+  if (removeExisting) await db.prepare('DELETE FROM finding_lines WHERE design_id=?').bind(designId).run();
+  const statements = findings.filter(f => f && (f.description || f.metal)).map((f, i) => db.prepare(`INSERT INTO finding_lines
+    (id,design_id,description,finding_type,metal,sort_order) VALUES (?,?,?,?,?,?)`).bind(crypto.randomUUID(), designId,
+      String(f.description || ''), ['Chain','Earring Backs','Other'].includes(f.finding_type) ? f.finding_type : 'Other', String(f.metal || ''), i));
+  if (statements.length) await db.batch(statements);
 }
 
 async function getProject(db, user, projectId) {
@@ -469,12 +523,14 @@ async function getDesign(db, user, designId) {
 async function designDetail(db, designId) {
   const design = await db.prepare(`SELECT d.*, p.name AS project_name, p.status AS project_status, p.approved_design_id FROM designs d JOIN projects p ON p.id=d.project_id WHERE d.id=?`).bind(designId).first();
   if (!design) return null;
-  const [diamonds, files, comments] = await Promise.all([
+  const [diamonds, findings, files, comments] = await Promise.all([
     db.prepare('SELECT * FROM diamond_lines WHERE design_id=? ORDER BY sort_order,id').bind(designId).all(),
+    db.prepare('SELECT * FROM finding_lines WHERE design_id=? ORDER BY sort_order,id').bind(designId).all(),
     db.prepare(`SELECT id,filename,content_type,size_bytes FROM files WHERE design_id=? AND kind='design' ORDER BY created_at`).bind(designId).all(),
     db.prepare(`SELECT c.id,c.body,c.created_at,u.display_name,u.role FROM comments c JOIN users u ON u.id=c.user_id WHERE c.design_id=? ORDER BY datetime(c.created_at), c.id`).bind(designId).all(),
   ]);
   design.diamonds = diamonds.results || [];
+  design.findings = findings.results || [];
   design.files = files.results || [];
   design.comments = comments.results || [];
   design.total_ctw = design.diamonds.reduce((sum, d) => sum + (Number(d.weight_ct) || 0) * (d.weight_mode === 'each' ? (Number(d.stone_count) || 1) : 1), 0);
