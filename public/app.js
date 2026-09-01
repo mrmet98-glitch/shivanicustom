@@ -1,6 +1,7 @@
 const app = document.querySelector('#app');
 const toastEl = document.querySelector('#toast');
-const state = { user:null, projects:[], currentProject:null, statuses:[] };
+const DASHBOARD_STATUSES=['Project Received','Designs Generated','Designs In Review','Project Approved','In Production','Shivani Gems QC','Shipped','Delivered'];
+const state = { user:null, projects:[], currentProject:null, statuses:[], dashboardView:'cards', dashboardStatus:'all' };
 
 window.addEventListener('hashchange', renderRoute);
 window.addEventListener('DOMContentLoaded', boot);
@@ -64,19 +65,34 @@ async function renderDashboard(){
   app.innerHTML=shell(`<div class="loading">Loading projects…</div>`); bindTopbar();
   try{
     const r=await api('/api/projects'); state.projects=r.projects||[];
-    const isAdmin=state.user.role==='admin';
-    app.innerHTML=shell(`<section class="hero"><div><div class="eyebrow">${isAdmin?'Admin workspace':'Customer portal'}</div><h1>${isAdmin?'Custom Project Dashboard':'Your Custom Projects'}</h1><p>${isAdmin?'Create projects, add proposals, manage production status and respond to customer comments.':'Review project details, compare proposals, leave feedback and approve your preferred design.'}</p></div>${isAdmin?'<button id="newProjectBtn" class="btn btn-primary">+ New Project</button>':''}</section>
-      ${state.projects.length?`<div class="grid">${state.projects.map(projectCard).join('')}</div>`:`<div class="empty">No projects yet.${isAdmin?' Create the first one to get started.':''}</div>`}`);
-    bindTopbar();
-    document.querySelectorAll('[data-project]').forEach(el=>el.onclick=()=>location.hash=`/project/${el.dataset.project}`);
-    if(isAdmin) document.querySelector('#newProjectBtn').onclick=openNewProjectModal;
+    renderDashboardContent();
   }catch(e){ app.innerHTML=shell(`<div class="empty">${esc(e.message)}</div>`);bindTopbar(); }
 }
 
+function renderDashboardContent(){
+  const isAdmin=state.user.role==='admin', filtered=state.dashboardStatus==='all'?state.projects:state.projects.filter(p=>p.status===state.dashboardStatus);
+  app.innerHTML=shell(`<section class="hero"><div><div class="eyebrow">${isAdmin?'Admin workspace':'Customer portal'}</div><h1>${isAdmin?'Custom Project Dashboard':'Your Custom Projects'}</h1><p>${isAdmin?'Create projects, add proposals, manage production status and respond to customer comments.':'Review project details, compare proposals, leave feedback and approve your preferred design.'}</p></div>${isAdmin?'<button id="newProjectBtn" class="btn btn-primary">+ New Project</button>':''}</section>
+    <section class="dashboard-tools" aria-label="Project view controls"><div class="view-toggle"><button class="btn btn-small ${state.dashboardView==='cards'?'active':''}" data-dashboard-view="cards">Cards</button><button class="btn btn-small ${state.dashboardView==='kanban'?'active':''}" data-dashboard-view="kanban">Timeline / Kanban</button></div><div class="field status-filter"><label for="dashboardStatus">Filter by stage</label><select id="dashboardStatus"><option value="all">All stages (${state.projects.length})</option>${DASHBOARD_STATUSES.map(s=>`<option value="${escAttr(s)}" ${state.dashboardStatus===s?'selected':''}>${esc(s)} (${state.projects.filter(p=>p.status===s).length})</option>`).join('')}</select></div></section>
+    ${state.projects.length?(state.dashboardView==='kanban'?kanbanView(filtered):filtered.length?`<div class="grid">${filtered.map(projectCard).join('')}</div>`:`<div class="empty">No projects in this stage.</div>`):`<div class="empty">No projects yet.${isAdmin?' Create the first one to get started.':''}</div>`}`);
+  bindTopbar();document.querySelectorAll('[data-project]').forEach(el=>el.onclick=()=>location.hash=`/project/${el.dataset.project}`);
+  document.querySelectorAll('[data-dashboard-view]').forEach(el=>el.onclick=()=>{state.dashboardView=el.dataset.dashboardView;renderDashboardContent()});
+  document.querySelector('#dashboardStatus').onchange=e=>{state.dashboardStatus=e.target.value;renderDashboardContent()};
+  if(isAdmin) document.querySelector('#newProjectBtn').onclick=openNewProjectModal;
+}
+
+function kanbanView(projects){
+  const stages=state.dashboardStatus==='all'?DASHBOARD_STATUSES:[state.dashboardStatus];
+  return `<div class="kanban" aria-label="Projects grouped by stage">${stages.map((status,i)=>{const items=projects.filter(p=>p.status===status);return `<section class="kanban-column tone-${statusTone(status)}"><header><span class="kanban-dot"></span><h2>${esc(status)}</h2><strong>${items.length}</strong></header><div class="kanban-items">${items.length?items.map(kanbanCard).join(''):'<div class="kanban-empty">No projects</div>'}</div></section>`}).join('')}</div>`;
+}
+
+function kanbanCard(p){return `<article class="kanban-card" data-project="${p.id}"><h3>${esc(p.name)}</h3><div class="muted">${Number(p.design_count)||0} proposal${Number(p.design_count)===1?'':'s'}</div><div class="kanban-date"><span>Delivery</span><strong>${p.requested_delivery_date?dateOnly(p.requested_delivery_date):'Not set'}</strong></div></article>`}
+
 function projectCard(p){
-  return `<article class="project-card" data-project="${p.id}"><div class="card-top"><div><h3>${esc(p.name)}</h3><div class="muted" style="font-size:12px">Created ${dateFmt(p.created_at)}</div></div><span class="status">${esc(p.status)}</span></div>
+  return `<article class="project-card" data-project="${p.id}"><div class="card-top"><div><h3>${esc(p.name)}</h3><div class="muted" style="font-size:12px">Created ${dateFmt(p.created_at)}</div></div><span class="status tone-${statusTone(p.status)}">${esc(p.status)}</span></div>
     <div class="meta"><div class="meta-item"><span>Proposals</span><strong>${Number(p.design_count)||0}</strong></div><div class="meta-item"><span>Requested Delivery</span><strong>${p.requested_delivery_date?dateOnly(p.requested_delivery_date):'Not set'}</strong></div></div></article>`;
 }
+
+function statusTone(status){return Math.max(0,DASHBOARD_STATUSES.indexOf(status))}
 
 async function renderProject(id){
   app.innerHTML=shell(`<div class="loading">Loading project…</div>`);bindTopbar();
