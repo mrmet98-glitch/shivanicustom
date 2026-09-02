@@ -67,6 +67,7 @@ async function route(context) {
     if (parts.length === 2 && method === 'PATCH') return updateDesign(request, env, user, designId);
     if (parts[2] === 'comments' && method === 'POST') return addComment(request, env, user, designId);
     if (parts[2] === 'approve' && method === 'POST') return approveDesign(env, user, designId);
+    if (parts[2] === 'review' && method === 'PATCH') return reviewDesign(request, env, user, designId);
   }
 
   if (parts[0] === 'files' && parts[1] && method === 'GET') {
@@ -120,6 +121,7 @@ async function ensureSchema(db) {
       has_price INTEGER NOT NULL DEFAULT 1,
       price_includes_diamonds INTEGER NOT NULL DEFAULT 0,
       price_includes_findings INTEGER NOT NULL DEFAULT 0,
+      review_status TEXT NOT NULL DEFAULT 'pending',
       approved INTEGER NOT NULL DEFAULT 0,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -169,17 +171,38 @@ async function ensureSchema(db) {
       FOREIGN KEY(design_id) REFERENCES designs(id) ON DELETE CASCADE,
       FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
     )`,
+    `CREATE TABLE IF NOT EXISTS project_activity (
+      id TEXT PRIMARY KEY,
+      project_id TEXT NOT NULL,
+      design_id TEXT,
+      actor_user_id TEXT NOT NULL,
+      activity_type TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY(design_id) REFERENCES designs(id) ON DELETE CASCADE,
+      FOREIGN KEY(actor_user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`,
+    `CREATE TABLE IF NOT EXISTS project_activity_reads (
+      project_id TEXT NOT NULL,
+      user_id TEXT NOT NULL,
+      last_seen_at TEXT NOT NULL,
+      PRIMARY KEY(project_id,user_id),
+      FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE,
+      FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+    )`,
     `CREATE INDEX IF NOT EXISTS idx_designs_project ON designs(project_id)`,
     `CREATE INDEX IF NOT EXISTS idx_files_project ON files(project_id)`,
     `CREATE INDEX IF NOT EXISTS idx_files_design ON files(design_id)`,
     `CREATE INDEX IF NOT EXISTS idx_comments_design ON comments(design_id)`,
     `CREATE INDEX IF NOT EXISTS idx_findings_design ON finding_lines(design_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_activity_project ON project_activity(project_id,created_at)`,
     `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
   ];
   await db.batch(statements.map((s) => db.prepare(s)));
   await ensureColumn(db, 'designs', 'has_price', 'INTEGER NOT NULL DEFAULT 1');
   await ensureColumn(db, 'designs', 'price_includes_diamonds', 'INTEGER NOT NULL DEFAULT 0');
   await ensureColumn(db, 'designs', 'price_includes_findings', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn(db, 'designs', 'review_status', "TEXT NOT NULL DEFAULT 'pending'");
   await ensureColumn(db, 'diamond_lines', 'diamond_origin', "TEXT NOT NULL DEFAULT ''");
 }
 
@@ -297,10 +320,16 @@ async function listProjects(db, user) {
   const rows = await db.prepare(`
     SELECT p.*,
       (SELECT COUNT(*) FROM designs d WHERE d.project_id = p.id) AS design_count,
+      (SELECT COUNT(*) FROM project_activity a WHERE a.project_id=p.id AND a.actor_user_id<>? AND a.activity_type='comment'
+        AND datetime(a.created_at)>datetime(COALESCE((SELECT r.last_seen_at FROM project_activity_reads r WHERE r.project_id=p.id AND r.user_id=?),'1970-01-01'))) AS unseen_comment_count,
+      (SELECT COUNT(*) FROM project_activity a WHERE a.project_id=p.id AND a.actor_user_id<>? AND a.activity_type='design_created'
+        AND datetime(a.created_at)>datetime(COALESCE((SELECT r.last_seen_at FROM project_activity_reads r WHERE r.project_id=p.id AND r.user_id=?),'1970-01-01'))) AS unseen_design_count,
+      (SELECT COUNT(*) FROM project_activity a WHERE a.project_id=p.id AND a.actor_user_id<>? AND a.activity_type IN ('design_updated','design_reviewed','design_rejected','design_approved','project_updated')
+        AND datetime(a.created_at)>datetime(COALESCE((SELECT r.last_seen_at FROM project_activity_reads r WHERE r.project_id=p.id AND r.user_id=?),'1970-01-01'))) AS unseen_update_count,
       (SELECT COALESCE(SUM(CASE WHEN dl.weight_mode='each' THEN COALESCE(dl.weight_ct,0)*COALESCE(dl.stone_count,1) ELSE COALESCE(dl.weight_ct,0) END),0)
        FROM diamond_lines dl JOIN designs d2 ON d2.id=dl.design_id WHERE d2.project_id=p.id) AS project_total_ctw
     FROM projects p ORDER BY datetime(p.updated_at) DESC, datetime(p.created_at) DESC
-  `).all();
+  `).bind(user.id,user.id,user.id,user.id,user.id,user.id).all();
   return json({ projects: rows.results || [] });
 }
 
@@ -333,6 +362,7 @@ async function createProject(request, env, user) {
     VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(id, project.name, project.project_type, project.client_reference, project.details, project.requested_delivery_date,
     project.metal, project.size_details, project.supplied_materials, project.internal_notes, project.status, now, now).run();
+  await recordActivity(env.DB, { projectId:id, actorUserId:user.id, type:'project_updated' });
 
   try {
     await saveUploads(env, form.getAll('reference_images'), { projectId: id, designId: null, kind: 'reference' });
@@ -362,6 +392,7 @@ async function updateProject(request, db, user, projectId) {
   sets.push('updated_at=?');
   vals.push(new Date().toISOString(), projectId);
   await db.prepare(`UPDATE projects SET ${sets.join(',')} WHERE id=?`).bind(...vals).run();
+  await recordActivity(db, { projectId, actorUserId:user.id, type:'project_updated' });
   return json({ ok: true });
 }
 
@@ -396,6 +427,7 @@ async function updateProjectStatus(request, env, user, projectId) {
   const result = await env.DB.prepare('UPDATE projects SET status=?, updated_at=? WHERE id=?')
     .bind(body.status, new Date().toISOString(), projectId).run();
   if (!result.meta?.changes) return json({ error: 'Project not found.' }, 404);
+  await recordActivity(env.DB, { projectId, actorUserId:user.id, type:'project_updated' });
   const notificationWarning = await notifyHubSpot(env, {
     eventType: 'status_updated', projectId, projectName: project.name,
     actorName: user.display_name, actorRole: user.role, projectStatus: body.status,
@@ -447,6 +479,7 @@ async function createDesign(request, env, user, projectId) {
     await replaceFindings(env.DB, id, findings, false);
     await saveUploads(env, form.getAll('design_images'), { projectId, designId: id, kind: 'design' });
     await env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(now,projectId).run();
+    await recordActivity(env.DB, { projectId, designId:id, actorUserId:user.id, type:'design_created' });
   } catch (e) {
     await env.DB.prepare('DELETE FROM designs WHERE id=?').bind(id).run();
     throw e;
@@ -474,7 +507,7 @@ async function updateDesign(request, env, user, designId) {
   catch { return json({ error: 'Proposal line information is invalid.' }, 400); }
   if (!Array.isArray(diamonds) || !Array.isArray(findings)) return json({ error: 'Proposal lines must be arrays.' }, 400);
   const now = new Date().toISOString();
-  await env.DB.prepare(`UPDATE designs SET title=?,description=?,metal=?,price_cents=?,has_price=?,price_includes_diamonds=?,price_includes_findings=?,updated_at=? WHERE id=?`)
+  await env.DB.prepare(`UPDATE designs SET title=?,description=?,metal=?,price_cents=?,has_price=?,price_includes_diamonds=?,price_includes_findings=?,review_status=CASE WHEN review_status='reviewed' THEN 'pending' ELSE review_status END,updated_at=? WHERE id=?`)
     .bind(title, text(form, 'description'), text(form, 'metal'), Math.round(price * 100), hasPrice ? 1 : 0,
       hasPrice && form.get('price_includes_diamonds') === 'on' ? 1 : 0, hasPrice && form.get('price_includes_findings') === 'on' ? 1 : 0, now, designId).run();
   await env.DB.prepare('DELETE FROM diamond_lines WHERE design_id=?').bind(designId).run();
@@ -485,6 +518,7 @@ async function updateDesign(request, env, user, designId) {
   await replaceFindings(env.DB, designId, findings, true);
   await saveUploads(env, form.getAll('design_images'), { projectId: existing.project_id, designId, kind: 'design' });
   await env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(now, existing.project_id).run();
+  await recordActivity(env.DB, { projectId:existing.project_id, designId, actorUserId:user.id, type:'design_updated' });
   return json({ design: await designDetail(env.DB, designId) });
 }
 
@@ -497,6 +531,7 @@ async function replaceFindings(db, designId, findings, removeExisting) {
 }
 
 async function getProject(db, user, projectId) {
+  const seenAt = new Date().toISOString();
   const project = await db.prepare('SELECT * FROM projects WHERE id=?').bind(projectId).first();
   if (!project) return json({ error: 'Project not found.' }, 404);
   if (user.role !== 'admin') delete project.internal_notes;
@@ -511,6 +546,8 @@ async function getProject(db, user, projectId) {
     ORDER BY d.approved DESC, datetime(d.created_at) DESC
   `).bind(projectId).all();
 
+  await db.prepare(`INSERT INTO project_activity_reads (project_id,user_id,last_seen_at) VALUES (?,?,?)
+    ON CONFLICT(project_id,user_id) DO UPDATE SET last_seen_at=excluded.last_seen_at`).bind(projectId,user.id,seenAt).run();
   return json({ project, reference_files: refs.results || [], designs: designs.results || [], statuses: STATUS_STEPS });
 }
 
@@ -547,6 +584,8 @@ async function addComment(request, env, user, designId) {
   if (comment.length > 5000) return json({ error: 'Comment is too long.' }, 400);
   const id = crypto.randomUUID();
   await env.DB.prepare('INSERT INTO comments (id,design_id,user_id,body) VALUES (?,?,?,?)').bind(id,designId,user.id,comment).run();
+  await env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(new Date().toISOString(),exists.project_id).run();
+  await recordActivity(env.DB, { projectId:exists.project_id, designId, actorUserId:user.id, type:'comment' });
   const row = await env.DB.prepare(`SELECT c.id,c.body,c.created_at,u.display_name,u.role FROM comments c JOIN users u ON u.id=c.user_id WHERE c.id=?`).bind(id).first();
   const notificationWarning = await notifyHubSpot(env, {
     eventType: 'comment_created', projectId: exists.project_id, projectName: exists.project_name,
@@ -563,15 +602,37 @@ async function approveDesign(env, user, designId) {
   const now = new Date().toISOString();
   await env.DB.batch([
     env.DB.prepare('UPDATE designs SET approved=0, updated_at=? WHERE project_id=?').bind(now,d.project_id),
-    env.DB.prepare('UPDATE designs SET approved=1, updated_at=? WHERE id=?').bind(now,designId),
+    env.DB.prepare("UPDATE designs SET approved=1, review_status='reviewed', updated_at=? WHERE id=?").bind(now,designId),
     env.DB.prepare('UPDATE projects SET approved_design_id=?, status=?, updated_at=? WHERE id=?').bind(designId,'Project Approved',now,d.project_id),
   ]);
+  await recordActivity(env.DB, { projectId:d.project_id, designId, actorUserId:user.id, type:'design_approved' });
   const notificationWarning = await notifyHubSpot(env, {
     eventType: 'design_approved', projectId: d.project_id, projectName: d.project_name,
     designId, designTitle: d.title, actorName: user.display_name, actorRole: user.role,
     projectStatus: 'Project Approved',
   });
   return json({ ok: true, project_id: d.project_id, status: 'Project Approved', notification_warning: notificationWarning });
+}
+
+async function reviewDesign(request, env, user, designId) {
+  if (user.role !== 'customer') return json({ error: 'Only the customer can review a design.' }, 403);
+  const body = await readJson(request);
+  if (!['reviewed','rejected'].includes(body.status)) return json({ error: 'Review status must be reviewed or rejected.' }, 400);
+  const design = await env.DB.prepare('SELECT id,project_id,approved FROM designs WHERE id=?').bind(designId).first();
+  if (!design) return json({ error: 'Design not found.' }, 404);
+  if (body.status === 'rejected' && Number(design.approved) === 1) return json({ error: 'An approved design cannot be rejected.' }, 409);
+  const now = new Date().toISOString();
+  await env.DB.batch([
+    env.DB.prepare('UPDATE designs SET review_status=?,updated_at=? WHERE id=?').bind(body.status,now,designId),
+    env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(now,design.project_id),
+  ]);
+  await recordActivity(env.DB, { projectId:design.project_id, designId, actorUserId:user.id, type:body.status === 'rejected' ? 'design_rejected' : 'design_reviewed' });
+  return json({ ok:true, project_id:design.project_id, review_status:body.status });
+}
+
+async function recordActivity(db, { projectId, designId=null, actorUserId, type }) {
+  await db.prepare(`INSERT INTO project_activity (id,project_id,design_id,actor_user_id,activity_type,created_at) VALUES (?,?,?,?,?,?)`)
+    .bind(crypto.randomUUID(),projectId,designId,actorUserId,type,new Date().toISOString()).run();
 }
 
 async function serveFile(env, user, fileId) {
