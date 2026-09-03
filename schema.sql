@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS diamond_lines (
   stone_count INTEGER NOT NULL DEFAULT 1,
   color_clarity TEXT,
   diamond_origin TEXT NOT NULL DEFAULT '',
+  provided_by TEXT NOT NULL DEFAULT '',
   measurements TEXT,
   sort_order INTEGER NOT NULL DEFAULT 0,
   FOREIGN KEY(design_id) REFERENCES designs(id) ON DELETE CASCADE

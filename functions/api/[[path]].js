@@ -55,7 +55,7 @@ async function route(context) {
   if (parts[0] === 'projects' && parts[1]) {
     const projectId = parts[1];
     if (parts.length === 2 && method === 'GET') return getProject(env.DB, user, projectId);
-    if (parts.length === 2 && method === 'PATCH') return updateProject(request, env.DB, user, projectId);
+    if (parts.length === 2 && method === 'PATCH') return updateProject(request, env, user, projectId);
     if (parts.length === 2 && method === 'DELETE') return deleteProject(env, user, projectId);
     if (parts[2] === 'status' && method === 'PATCH') return updateProjectStatus(request, env, user, projectId);
     if (parts[2] === 'designs' && method === 'POST') return createDesign(request, env, user, projectId);
@@ -136,6 +136,7 @@ async function ensureSchema(db) {
       stone_count INTEGER NOT NULL DEFAULT 1,
       color_clarity TEXT,
       diamond_origin TEXT NOT NULL DEFAULT '',
+      provided_by TEXT NOT NULL DEFAULT '',
       measurements TEXT,
       sort_order INTEGER NOT NULL DEFAULT 0,
       FOREIGN KEY(design_id) REFERENCES designs(id) ON DELETE CASCADE
@@ -204,6 +205,7 @@ async function ensureSchema(db) {
   await ensureColumn(db, 'designs', 'price_includes_findings', 'INTEGER NOT NULL DEFAULT 0');
   await ensureColumn(db, 'designs', 'review_status', "TEXT NOT NULL DEFAULT 'pending'");
   await ensureColumn(db, 'diamond_lines', 'diamond_origin', "TEXT NOT NULL DEFAULT ''");
+  await ensureColumn(db, 'diamond_lines', 'provided_by', "TEXT NOT NULL DEFAULT ''");
 }
 
 async function ensureColumn(db, table, column, definition) {
@@ -374,24 +376,42 @@ async function createProject(request, env, user) {
   return json({ project: await projectSummary(env.DB, id) }, 201);
 }
 
-async function updateProject(request, db, user, projectId) {
+async function updateProject(request, env, user, projectId) {
   if (user.role !== 'admin') return forbidden();
+  const db = env.DB;
   const exists = await db.prepare('SELECT id FROM projects WHERE id=?').bind(projectId).first();
   if (!exists) return json({ error: 'Project not found.' }, 404);
-  const body = await readJson(request);
+  const isMultipart = (request.headers.get('content-type') || '').includes('multipart/form-data');
+  const form = isMultipart ? await request.formData() : null;
+  const body = form ? Object.fromEntries(form) : await readJson(request);
   const allowed = ['name','project_type','client_reference','details','requested_delivery_date','metal','size_details','supplied_materials','internal_notes'];
   const sets = [];
   const vals = [];
   for (const key of allowed) {
     if (Object.prototype.hasOwnProperty.call(body, key)) {
       sets.push(`${key}=?`);
-      vals.push(body[key] == null ? '' : String(body[key]));
+      vals.push(body[key] == null ? '' : String(body[key]).trim());
     }
   }
-  if (!sets.length) return json({ ok: true });
-  sets.push('updated_at=?');
-  vals.push(new Date().toISOString(), projectId);
-  await db.prepare(`UPDATE projects SET ${sets.join(',')} WHERE id=?`).bind(...vals).run();
+  const removeIds = parseJsonOr(form?.get('remove_reference_ids') || '[]', null);
+  if (!Array.isArray(removeIds)) return json({ error: 'Invalid reference image selection.' }, 400);
+  const uniqueRemoveIds = [...new Set(removeIds.map(String))];
+  const removable = [];
+  for (const fileId of uniqueRemoveIds) {
+    const file = await db.prepare("SELECT id,object_key FROM files WHERE id=? AND project_id=? AND kind='reference'").bind(fileId, projectId).first();
+    if (file) removable.push(file);
+  }
+  if (form) await saveUploads(env, form.getAll('reference_images'), { projectId, designId:null, kind:'reference' });
+  if (sets.length) {
+    sets.push('updated_at=?');
+    vals.push(new Date().toISOString(), projectId);
+    await db.prepare(`UPDATE projects SET ${sets.join(',')} WHERE id=?`).bind(...vals).run();
+  }
+  for (const file of removable) await db.prepare('DELETE FROM files WHERE id=?').bind(file.id).run();
+  if (removable.length) {
+    try { await env.UPLOADS.delete(removable.map(file => file.object_key)); }
+    catch (error) { console.error('Reference image cleanup error', error); }
+  }
   await recordActivity(db, { projectId, actorUserId:user.id, type:'project_updated' });
   return json({ ok: true });
 }
@@ -468,13 +488,13 @@ async function createDesign(request, env, user, projectId) {
 
   try {
     const diamondStatements = diamonds
-      .filter(d => d && (d.shape || d.weight_ct || d.stone_count || d.color_clarity || d.measurements))
+      .filter(d => d && (d.shape || d.weight_ct || d.stone_count || d.color_clarity || d.measurements || d.provided_by))
       .map((d, i) => env.DB.prepare(`INSERT INTO diamond_lines
-        (id,design_id,shape,weight_ct,weight_mode,stone_count,color_clarity,diamond_origin,measurements,sort_order)
-        VALUES (?,?,?,?,?,?,?,?,?,?)`)
+        (id,design_id,shape,weight_ct,weight_mode,stone_count,color_clarity,diamond_origin,provided_by,measurements,sort_order)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
         .bind(crypto.randomUUID(), id, String(d.shape || ''), numberOrNull(d.weight_ct), d.weight_mode === 'each' ? 'each' : 'total',
           Math.max(1, parseInt(d.stone_count || 1, 10)), String(d.color_clarity || ''),
-          ['Natural', 'Lab Grown'].includes(d.diamond_origin) ? d.diamond_origin : '', String(d.measurements || ''), i));
+          ['Natural', 'Lab Grown'].includes(d.diamond_origin) ? d.diamond_origin : '', normalizeProvidedBy(d.provided_by), String(d.measurements || ''), i));
     if (diamondStatements.length) await env.DB.batch(diamondStatements);
     await replaceFindings(env.DB, id, findings, false);
     await saveUploads(env, form.getAll('design_images'), { projectId, designId: id, kind: 'design' });
@@ -506,17 +526,29 @@ async function updateDesign(request, env, user, designId) {
   try { diamonds = JSON.parse(text(form, 'diamonds') || '[]'); findings = JSON.parse(text(form, 'findings') || '[]'); }
   catch { return json({ error: 'Proposal line information is invalid.' }, 400); }
   if (!Array.isArray(diamonds) || !Array.isArray(findings)) return json({ error: 'Proposal lines must be arrays.' }, 400);
+  const removeImageIds = parseJsonOr(text(form, 'remove_design_image_ids') || '[]', null);
+  if (!Array.isArray(removeImageIds)) return json({ error: 'Invalid proposal image selection.' }, 400);
+  const removableImages = [];
+  for (const fileId of [...new Set(removeImageIds.map(String))]) {
+    const file = await env.DB.prepare("SELECT id,object_key FROM files WHERE id=? AND design_id=? AND kind='design'").bind(fileId, designId).first();
+    if (file) removableImages.push(file);
+  }
   const now = new Date().toISOString();
   await env.DB.prepare(`UPDATE designs SET title=?,description=?,metal=?,price_cents=?,has_price=?,price_includes_diamonds=?,price_includes_findings=?,review_status=CASE WHEN review_status='reviewed' THEN 'pending' ELSE review_status END,updated_at=? WHERE id=?`)
     .bind(title, text(form, 'description'), text(form, 'metal'), Math.round(price * 100), hasPrice ? 1 : 0,
       hasPrice && form.get('price_includes_diamonds') === 'on' ? 1 : 0, hasPrice && form.get('price_includes_findings') === 'on' ? 1 : 0, now, designId).run();
   await env.DB.prepare('DELETE FROM diamond_lines WHERE design_id=?').bind(designId).run();
-  const diamondStatements = diamonds.filter(d => d && (d.shape || d.weight_ct || d.color_clarity || d.measurements)).map((d, i) => env.DB.prepare(`INSERT INTO diamond_lines
-    (id,design_id,shape,weight_ct,weight_mode,stone_count,color_clarity,diamond_origin,measurements,sort_order) VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .bind(crypto.randomUUID(), designId, String(d.shape || ''), numberOrNull(d.weight_ct), d.weight_mode === 'each' ? 'each' : 'total', Math.max(1, parseInt(d.stone_count || 1, 10)), String(d.color_clarity || ''), ['Natural','Lab Grown'].includes(d.diamond_origin) ? d.diamond_origin : '', String(d.measurements || ''), i));
+  const diamondStatements = diamonds.filter(d => d && (d.shape || d.weight_ct || d.color_clarity || d.measurements || d.provided_by)).map((d, i) => env.DB.prepare(`INSERT INTO diamond_lines
+    (id,design_id,shape,weight_ct,weight_mode,stone_count,color_clarity,diamond_origin,provided_by,measurements,sort_order) VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+    .bind(crypto.randomUUID(), designId, String(d.shape || ''), numberOrNull(d.weight_ct), d.weight_mode === 'each' ? 'each' : 'total', Math.max(1, parseInt(d.stone_count || 1, 10)), String(d.color_clarity || ''), ['Natural','Lab Grown'].includes(d.diamond_origin) ? d.diamond_origin : '', normalizeProvidedBy(d.provided_by), String(d.measurements || ''), i));
   if (diamondStatements.length) await env.DB.batch(diamondStatements);
   await replaceFindings(env.DB, designId, findings, true);
   await saveUploads(env, form.getAll('design_images'), { projectId: existing.project_id, designId, kind: 'design' });
+  for (const file of removableImages) await env.DB.prepare('DELETE FROM files WHERE id=?').bind(file.id).run();
+  if (removableImages.length) {
+    try { await env.UPLOADS.delete(removableImages.map(file => file.object_key)); }
+    catch (error) { console.error('Proposal image cleanup error', error); }
+  }
   await env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(now, existing.project_id).run();
   await recordActivity(env.DB, { projectId:existing.project_id, designId, actorUserId:user.id, type:'design_updated' });
   return json({ design: await designDetail(env.DB, designId) });
@@ -727,7 +759,9 @@ function publicUser(u) {
 
 function forbidden() { return json({ error: 'Admin access required.' }, 403); }
 function text(form, key) { return String(form.get(key) || '').trim(); }
+function parseJsonOr(value, fallback) { try { return JSON.parse(value); } catch { return fallback; } }
 function numberOrNull(v) { const n = Number(v); return Number.isFinite(n) ? n : null; }
+function normalizeProvidedBy(value) { return ['Customer Provided','Shivani Provided'].includes(value) ? value : ''; }
 function safeFilename(s) { return String(s || 'file').replace(/["\r\n]/g, '_'); }
 function sanitizeKey(s) { return String(s).replace(/[^a-zA-Z0-9._-]/g,'_').slice(-120); }
 function parseCookies(header) {
