@@ -255,8 +255,8 @@ function closeModal(){document.querySelector('#modalBackdrop')?.remove()}
 function bindTopbar(){document.querySelector('#logoutBtn')?.addEventListener('click',async()=>{await api('/api/logout',{method:'POST'}).catch(()=>{});state.user=null;location.hash='';renderLogin()})}
 function imageTag(f,alt){return `<img src="/api/files/${f.id}" alt="${escAttr(alt)}" data-lightbox="/api/files/${f.id}">`}
 function bindLightbox(root=document){root.querySelectorAll('[data-lightbox],.gallery img').forEach(img=>img.onclick=()=>{const src=img.dataset.lightbox||img.src;const l=document.createElement('div');l.className='lightbox';l.innerHTML=`<img src="${src}">`;l.onclick=()=>l.remove();document.body.appendChild(l)})}
-function toast(msg){toastEl.textContent=msg;toastEl.classList.add('show');clearTimeout(window.__toastT);window.__toastT=setTimeout(()=>toastEl.classList.remove('show'),String(msg).includes('HubSpot failed')?10000:2600)}
-function notificationMessage(success,response){return response?.notification_warning?`${success}, but HubSpot failed: ${response.notification_warning}`:success}
+function toast(msg){toastEl.textContent=msg;toastEl.classList.add('show');clearTimeout(window.__toastT);window.__toastT=setTimeout(()=>toastEl.classList.remove('show'),String(msg).includes('notification failed')?10000:2600)}
+function notificationMessage(success,response){return response?.notification_warning?`${success}, but notification failed: ${response.notification_warning}`:success}
 function money(cents){return new Intl.NumberFormat('en-US',{style:'currency',currency:'USD'}).format((Number(cents)||0)/100)}
 function priceHtml(d){return `<div class="price-wrap"><div class="price">${Number(d.has_price)===0?'Quote pending':money(d.price_cents)}</div>${Number(d.has_price)!==0&&Number(d.price_includes_diamonds)===1?'<div class="price-note">Includes Shivani-provided diamonds</div>':''}${Number(d.has_price)!==0&&Number(d.price_includes_findings)===1?'<div class="price-note">Includes cost of chain/findings</div>':''}</div>`}
 function num(n,d=2){return Number(n||0).toFixed(d).replace(/\.?0+$/,'')}

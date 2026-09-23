@@ -146,7 +146,7 @@ Then use Wrangler Pages dev with local D1/R2 bindings. For production deployment
 - Internal project notes are stripped from the customer API response.
 
 ## V1 intentionally not included yet
-- Gmail-specific notification integration (notifications use HubSpot instead)
+- Gmail-specific notification integration (transactional notifications use Resend instead)
 - Multiple customer organizations/accounts
 - Password reset flow
 - Fine-grained audit history / notification center
@@ -155,19 +155,25 @@ Then use Wrangler Pages dev with local D1/R2 bindings. For production deployment
 
 Those are good V2 additions once the single-customer workflow is validated.
 
-## HubSpot notifications
+## Resend notifications
 
-The API submits portal events to the HubSpot form for portal `45715522`, form `3799d2a4-7876-4b70-9c14-054dcff947c2`, using `doug@uniqjewelry.com` as the enrolled contact. The supported event types are `design_created`, `comment_created`, `design_approved`, and `status_updated`. HubSpot workflows remain responsible for branching and sending customer or internal emails.
+The API sends portal events through published Resend templates. New designs, admin comments, and status updates go to the customer; customer comments and design approvals go to the internal team. The supported event types are `design_created`, `comment_created`, `design_approved`, and `status_updated`.
 
-The defaults can be changed without a code edit by adding any of these Cloudflare environment variables and redeploying:
+Add `RESEND_API_KEY` as an encrypted Cloudflare secret. The remaining defaults can be changed without a code edit by adding any of these Cloudflare environment variables and redeploying:
 
 ```dotenv
-HUBSPOT_PORTAL_ID=45715522
-HUBSPOT_FORM_ID=3799d2a4-7876-4b70-9c14-054dcff947c2
-HUBSPOT_CUSTOMER_EMAIL=doug@uniqjewelry.com
+RESEND_FROM_EMAIL=Shivani Gems Custom Projects <saunak@shivanigems.com>
+RESEND_REPLY_TO=saunak@shivanigems.com
+CUSTOMER_NOTIFICATION_EMAIL=doug@uniqjewelry.com
+INTERNAL_NOTIFICATION_EMAILS=saunak@shivanigems.com,atit@shivanigems.com
+RESEND_TEMPLATE_NEW_DESIGN_CUSTOMER=f6ce7f37-e54f-4376-bd7b-b8c860864f1f
+RESEND_TEMPLATE_COMMENT_CUSTOMER=7aaaab43-c893-4742-b6a4-9a889e5d3e63
+RESEND_TEMPLATE_COMMENT_INTERNAL=ab32d087-e2f2-4709-9230-803cf5ca790d
+RESEND_TEMPLATE_DESIGN_APPROVED=4521d9b8-8b02-4663-bd0f-07fa50f3a322
+RESEND_TEMPLATE_STATUS_UPDATED=497ab82a-d7e4-4309-a6af-c082c5a54273
 PORTAL_URL=https://shivanicustom.pages.dev
 ```
 
-Notification delivery is best-effort: HubSpot failures are logged but do not undo a successfully saved comment, proposal, approval, or status update. The HubSpot form must contain fields matching the `portal_*` internal property names used by the API, and its workflow must allow re-enrollment for every submission.
+Notification delivery is best-effort: Resend failures are logged but do not undo a successfully saved comment, proposal, approval, or status update. Template IDs and recipient lists are configurable so they can be changed without another code deployment.
 
-When HubSpot rejects a submission, the portal shows the rejection beneath the successful action for ten seconds. This distinguishes delivery/configuration failures from workflow problems: if no warning appears, check the HubSpot form's submission history and workflow enrollment history; if a warning appears, its response text identifies the field or form setting HubSpot rejected.
+When Resend rejects a request, the portal shows the rejection beneath the successful action for ten seconds. If no warning appears but an email is missing, check the Resend email logs and the recipient's spam folder.

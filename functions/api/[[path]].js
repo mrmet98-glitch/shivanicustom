@@ -11,10 +11,18 @@ const STATUS_STEPS = [
 
 const SESSION_COOKIE = 'sg_session';
 const SESSION_DAYS = 14;
-const HUBSPOT_PORTAL_ID = '45715522';
-const HUBSPOT_FORM_ID = '3799d2a4-7876-4b70-9c14-054dcff947c2';
 const DEFAULT_CUSTOMER_EMAIL = 'doug@uniqjewelry.com';
+const DEFAULT_INTERNAL_EMAILS = ['saunak@shivanigems.com', 'atit@shivanigems.com'];
+const DEFAULT_FROM_EMAIL = 'Shivani Gems Custom Projects <saunak@shivanigems.com>';
+const DEFAULT_REPLY_TO_EMAIL = 'saunak@shivanigems.com';
 const DEFAULT_PORTAL_URL = 'https://shivanicustom.pages.dev';
+const RESEND_TEMPLATE_IDS = {
+  design_created: 'f6ce7f37-e54f-4376-bd7b-b8c860864f1f',
+  comment_customer: '7aaaab43-c893-4742-b6a4-9a889e5d3e63',
+  comment_internal: 'ab32d087-e2f2-4709-9230-803cf5ca790d',
+  design_approved: '4521d9b8-8b02-4663-bd0f-07fa50f3a322',
+  status_updated: '497ab82a-d7e4-4309-a6af-c082c5a54273',
+};
 
 export async function onRequest(context) {
   try {
@@ -448,7 +456,7 @@ async function updateProjectStatus(request, env, user, projectId) {
     .bind(body.status, new Date().toISOString(), projectId).run();
   if (!result.meta?.changes) return json({ error: 'Project not found.' }, 404);
   await recordActivity(env.DB, { projectId, actorUserId:user.id, type:'project_updated' });
-  const notificationWarning = await notifyHubSpot(env, {
+  const notificationWarning = await notifyResend(env, {
     eventType: 'status_updated', projectId, projectName: project.name,
     actorName: user.display_name, actorRole: user.role, projectStatus: body.status,
   });
@@ -505,7 +513,7 @@ async function createDesign(request, env, user, projectId) {
     throw e;
   }
 
-  const notificationWarning = await notifyHubSpot(env, {
+  const notificationWarning = await notifyResend(env, {
     eventType: 'design_created', projectId, projectName: project.name,
     designId: id, designTitle: title, actorName: user.display_name, actorRole: user.role,
   });
@@ -619,7 +627,7 @@ async function addComment(request, env, user, designId) {
   await env.DB.prepare('UPDATE projects SET updated_at=? WHERE id=?').bind(new Date().toISOString(),exists.project_id).run();
   await recordActivity(env.DB, { projectId:exists.project_id, designId, actorUserId:user.id, type:'comment' });
   const row = await env.DB.prepare(`SELECT c.id,c.body,c.created_at,u.display_name,u.role FROM comments c JOIN users u ON u.id=c.user_id WHERE c.id=?`).bind(id).first();
-  const notificationWarning = await notifyHubSpot(env, {
+  const notificationWarning = await notifyResend(env, {
     eventType: 'comment_created', projectId: exists.project_id, projectName: exists.project_name,
     designId, designTitle: exists.title, actorName: user.display_name, actorRole: user.role, message: comment,
   });
@@ -638,7 +646,7 @@ async function approveDesign(env, user, designId) {
     env.DB.prepare('UPDATE projects SET approved_design_id=?, status=?, updated_at=? WHERE id=?').bind(designId,'Project Approved',now,d.project_id),
   ]);
   await recordActivity(env.DB, { projectId:d.project_id, designId, actorUserId:user.id, type:'design_approved' });
-  const notificationWarning = await notifyHubSpot(env, {
+  const notificationWarning = await notifyResend(env, {
     eventType: 'design_approved', projectId: d.project_id, projectName: d.project_name,
     designId, designTitle: d.title, actorName: user.display_name, actorRole: user.role,
     projectStatus: 'Project Approved',
@@ -703,50 +711,82 @@ async function saveUploads(env, files, { projectId, designId, kind }) {
   }
 }
 
-async function notifyHubSpot(env, event) {
-  const portalId = env.HUBSPOT_PORTAL_ID || HUBSPOT_PORTAL_ID;
-  const formId = env.HUBSPOT_FORM_ID || HUBSPOT_FORM_ID;
-  const customerEmail = env.HUBSPOT_CUSTOMER_EMAIL || DEFAULT_CUSTOMER_EMAIL;
+async function notifyResend(env, event) {
+  const customerEmail = env.CUSTOMER_NOTIFICATION_EMAIL || DEFAULT_CUSTOMER_EMAIL;
+  const internalEmails = String(env.INTERNAL_NOTIFICATION_EMAILS || DEFAULT_INTERNAL_EMAILS.join(','))
+    .split(',').map(email => email.trim()).filter(Boolean);
+  const from = env.RESEND_FROM_EMAIL || DEFAULT_FROM_EMAIL;
+  const replyTo = env.RESEND_REPLY_TO || DEFAULT_REPLY_TO_EMAIL;
   const siteUrl = String(env.PORTAL_URL || DEFAULT_PORTAL_URL).replace(/\/$/, '');
   const projectUrl = `${siteUrl}/#/project/${encodeURIComponent(event.projectId)}`;
-  const values = {
-    email: customerEmail,
-    portal_event_type: event.eventType,
-    portal_event_id: crypto.randomUUID(),
-    portal_project_id: event.projectId,
-    portal_project_name: event.projectName,
-    portal_design_id: event.designId,
-    portal_design_title: event.designTitle,
-    portal_actor_name: event.actorName,
-    portal_actor_role: event.actorRole,
-    portal_message: event.message,
-    portal_project_status: event.projectStatus,
-    portal_url: projectUrl,
-  };
-  const fields = Object.entries(values)
-    .filter(([, value]) => value !== undefined && value !== null && value !== '')
-    .map(([name, value]) => ({ name, value: String(value) }));
+  const notification = resendNotification(event, projectUrl, customerEmail, internalEmails, env);
 
   try {
-    const response = await fetch(`https://api.hsforms.com/submissions/v3/integration/submit/${portalId}/${formId}`, {
+    if (!env.RESEND_API_KEY) throw new Error('RESEND_API_KEY is missing from the Cloudflare environment.');
+    if (!notification.to.length) throw new Error('No recipient email is configured for this notification.');
+    const response = await fetch('https://api.resend.com/emails', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: {
+        'Authorization': `Bearer ${env.RESEND_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
       body: JSON.stringify({
-        fields,
-        context: { pageUri: projectUrl, pageName: event.projectName || 'Custom Project Portal' },
+        from,
+        to: notification.to,
+        reply_to: replyTo,
+        template: {
+          id: notification.templateId,
+          variables: notification.variables,
+        },
       }),
     });
     if (!response.ok) {
       const detail = await response.text();
-      throw new Error(`HubSpot form submission failed (${response.status}): ${detail.slice(0, 500)}`);
+      throw new Error(`Resend email failed (${response.status}): ${detail.slice(0, 500)}`);
     }
     return null;
   } catch (error) {
     // Notifications must never roll back a successful portal action. Cloudflare
-    // logs retain the failure so the HubSpot configuration can be corrected.
-    console.error('HubSpot notification error', error);
+    // logs retain the failure so the Resend configuration can be corrected.
+    console.error('Resend notification error', error);
     return error?.message || String(error);
   }
+}
+
+function resendNotification(event, projectUrl, customerEmail, internalEmails, env) {
+  const common = { PROJECT_NAME: event.projectName, PROJECT_URL: projectUrl };
+  if (event.eventType === 'design_created') {
+    return {
+      to: [customerEmail],
+      templateId: env.RESEND_TEMPLATE_NEW_DESIGN_CUSTOMER || RESEND_TEMPLATE_IDS.design_created,
+      variables: { ...common, DESIGN_TITLE: event.designTitle },
+    };
+  }
+  if (event.eventType === 'comment_created') {
+    const isCustomerComment = event.actorRole === 'customer';
+    return {
+      to: isCustomerComment ? internalEmails : [customerEmail],
+      templateId: isCustomerComment
+        ? env.RESEND_TEMPLATE_COMMENT_INTERNAL || RESEND_TEMPLATE_IDS.comment_internal
+        : env.RESEND_TEMPLATE_COMMENT_CUSTOMER || RESEND_TEMPLATE_IDS.comment_customer,
+      variables: { ...common, ACTOR_NAME: event.actorName, COMMENT_MESSAGE: event.message },
+    };
+  }
+  if (event.eventType === 'design_approved') {
+    return {
+      to: internalEmails,
+      templateId: env.RESEND_TEMPLATE_DESIGN_APPROVED || RESEND_TEMPLATE_IDS.design_approved,
+      variables: { ...common, DESIGN_TITLE: event.designTitle },
+    };
+  }
+  if (event.eventType === 'status_updated') {
+    return {
+      to: [customerEmail],
+      templateId: env.RESEND_TEMPLATE_STATUS_UPDATED || RESEND_TEMPLATE_IDS.status_updated,
+      variables: { ...common, PROJECT_STATUS: event.projectStatus },
+    };
+  }
+  throw new Error(`Unsupported notification event: ${event.eventType}`);
 }
 
 async function projectSummary(db, id) {
