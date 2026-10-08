@@ -177,3 +177,28 @@ PORTAL_URL=https://shivanicustom.pages.dev
 Notification delivery is best-effort: Resend failures are logged but do not undo a successfully saved comment, proposal, approval, or status update. Template IDs and recipient lists are configurable so they can be changed without another code deployment.
 
 When Resend rejects a request, the portal shows the rejection beneath the successful action for ten seconds. If no warning appears but an email is missing, check the Resend email logs and the recipient's spam folder.
+
+## Project archiving and customer submissions
+
+Admins can archive/unarchive accepted projects from the project page. Archived projects retain their stage, proposals, comments, and files, and appear under **Archived Projects** for both admins and customers instead of the ongoing/completed lists.
+
+Customers can use **Submit Project** with the same project fields and multiple reference images, excluding internal notes. Submissions appear under **Pending Acceptance**. Customers can edit their own pending submissions, including their images; accepted and declined submissions are no longer customer-editable. Either admin can accept a submission, which adds it to the ongoing dashboard at **Project Received**, or decline it. Declined submissions remain in **Declined Submissions**. Declining sends no automatic email; contact the customer directly to explain.
+
+Existing projects default to accepted and unarchived. The API adds the new columns automatically on first request; no manual database migration is required.
+
+Two additional Resend templates are used (optional overrides shown):
+
+```dotenv
+RESEND_TEMPLATE_PROJECT_ACCEPTED_CUSTOMER=658dca8b-7312-42f1-80e3-2febf835a364
+RESEND_TEMPLATE_PROJECT_SUBMITTED_INTERNAL=412ae95b-2cc5-49c9-acaf-3a1189854582
+```
+
+Acceptance emails go to `CUSTOMER_NOTIFICATION_EMAIL` (Doug by default), with `CUSTOMER_NAME`, `PROJECT_NAME`, and `PROJECT_URL`. Submission emails go to `INTERNAL_NOTIFICATION_EMAILS` (Saunak and Atit by default), with those variables plus `REQUESTED_DELIVERY_DATE` (formatted date or `Not provided`). Both templates must be published in Resend. Existing `RESEND_API_KEY`, sender, reply-to, and portal URL configuration is reused. Email failures show a warning without undoing the saved submission or acceptance; a repeat acceptance does not send another email.
+
+Run the regression tests with Node 24 or later:
+
+```bash
+node --test tests/*.test.mjs
+```
+
+The API test uses in-memory SQLite and local object storage, and mocks Resend requests without sending real emails.

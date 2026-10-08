@@ -31,6 +31,9 @@ CREATE TABLE IF NOT EXISTS projects (
   internal_notes TEXT,
   status TEXT NOT NULL DEFAULT 'Project Received',
   approved_design_id TEXT,
+  archived INTEGER NOT NULL DEFAULT 0,
+  acceptance_status TEXT NOT NULL DEFAULT 'accepted',
+  submitted_by TEXT,
   created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
