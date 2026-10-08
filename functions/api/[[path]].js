@@ -17,6 +17,8 @@ const DEFAULT_FROM_EMAIL = 'Shivani Gems Custom Projects <saunak@shivanigems.com
 const DEFAULT_REPLY_TO_EMAIL = 'saunak@shivanigems.com';
 const DEFAULT_PORTAL_URL = 'https://shivanicustom.pages.dev';
 const RESEND_TEMPLATE_IDS = {
+  project_accepted: '658dca8b-7312-42f1-80e3-2febf835a364',
+  project_submitted: '412ae95b-2cc5-49c9-acaf-3a1189854582',
   design_created: 'f6ce7f37-e54f-4376-bd7b-b8c860864f1f',
   comment_customer: '7aaaab43-c893-4742-b6a4-9a889e5d3e63',
   comment_internal: 'ab32d087-e2f2-4709-9230-803cf5ca790d',
@@ -62,6 +64,11 @@ async function route(context) {
 
   if (parts[0] === 'projects' && parts[1]) {
     const projectId = parts[1];
+    const project = await env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(projectId).first();
+    if (!project || !canViewProject(project, user)) return json({ error:'Project not found.' }, 404);
+    if (parts.length === 3 && parts[2] === 'archive' && method === 'PATCH') return archiveProject(request, env, user, project);
+    if (parts.length === 3 && parts[2] === 'acceptance' && method === 'PATCH') return decideProject(request, env, user, project);
+    if (project.acceptance_status !== 'accepted' && ['status','designs'].includes(parts[2])) return json({ error:'Accept the project before starting production or adding proposals.' }, 409);
     if (parts.length === 2 && method === 'GET') return getProject(env.DB, user, projectId);
     if (parts.length === 2 && method === 'PATCH') return updateProject(request, env, user, projectId);
     if (parts.length === 2 && method === 'DELETE') return deleteProject(env, user, projectId);
@@ -71,6 +78,9 @@ async function route(context) {
 
   if (parts[0] === 'designs' && parts[1]) {
     const designId = parts[1];
+    const project = await env.DB.prepare('SELECT p.* FROM projects p JOIN designs d ON d.project_id=p.id WHERE d.id=?').bind(designId).first();
+    if (!project || !canViewProject(project, user)) return json({ error:'Design not found.' }, 404);
+    if (project.acceptance_status !== 'accepted') return json({ error:'Project is not accepted.' }, 409);
     if (parts.length === 2 && method === 'GET') return getDesign(env.DB, user, designId);
     if (parts.length === 2 && method === 'PATCH') return updateDesign(request, env, user, designId);
     if (parts[2] === 'comments' && method === 'POST') return addComment(request, env, user, designId);
@@ -116,6 +126,9 @@ async function ensureSchema(db) {
       internal_notes TEXT,
       status TEXT NOT NULL DEFAULT 'Project Received',
       approved_design_id TEXT,
+      archived INTEGER NOT NULL DEFAULT 0,
+      acceptance_status TEXT NOT NULL DEFAULT 'accepted',
+      submitted_by TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     )`,
@@ -208,6 +221,9 @@ async function ensureSchema(db) {
     `CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id)`,
   ];
   await db.batch(statements.map((s) => db.prepare(s)));
+  await ensureColumn(db, 'projects', 'archived', 'INTEGER NOT NULL DEFAULT 0');
+  await ensureColumn(db, 'projects', 'acceptance_status', "TEXT NOT NULL DEFAULT 'accepted'");
+  await ensureColumn(db, 'projects', 'submitted_by', 'TEXT');
   await ensureColumn(db, 'designs', 'has_price', 'INTEGER NOT NULL DEFAULT 1');
   await ensureColumn(db, 'designs', 'price_includes_diamonds', 'INTEGER NOT NULL DEFAULT 0');
   await ensureColumn(db, 'designs', 'price_includes_findings', 'INTEGER NOT NULL DEFAULT 0');
@@ -340,11 +356,10 @@ async function listProjects(db, user) {
        FROM diamond_lines dl JOIN designs d2 ON d2.id=dl.design_id WHERE d2.project_id=p.id) AS project_total_ctw
     FROM projects p ORDER BY datetime(p.updated_at) DESC, datetime(p.created_at) DESC
   `).bind(user.id,user.id,user.id,user.id,user.id,user.id).all();
-  return json({ projects: rows.results || [] });
+  return json({ projects: (rows.results || []).filter(p => canViewProject(p, user)).map(p => publicProject(p, user)) });
 }
 
 async function createProject(request, env, user) {
-  if (user.role !== 'admin') return forbidden();
   const form = await request.formData();
   const name = text(form, 'name');
   if (!name) return json({ error: 'Project name is required.' }, 400);
@@ -361,17 +376,17 @@ async function createProject(request, env, user) {
     metal: text(form, 'metal'),
     size_details: text(form, 'size_details'),
     supplied_materials: text(form, 'supplied_materials'),
-    internal_notes: text(form, 'internal_notes'),
+    internal_notes: user.role === 'admin' ? text(form, 'internal_notes') : '',
     status: 'Project Received',
     created_at: now,
     updated_at: now,
   };
 
   await env.DB.prepare(`INSERT INTO projects
-    (id,name,project_type,client_reference,details,requested_delivery_date,metal,size_details,supplied_materials,internal_notes,status,created_at,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)`
+    (id,name,project_type,client_reference,details,requested_delivery_date,metal,size_details,supplied_materials,internal_notes,status,created_at,updated_at,acceptance_status,submitted_by)
+    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
   ).bind(id, project.name, project.project_type, project.client_reference, project.details, project.requested_delivery_date,
-    project.metal, project.size_details, project.supplied_materials, project.internal_notes, project.status, now, now).run();
+    project.metal, project.size_details, project.supplied_materials, project.internal_notes, project.status, now, now, user.role === 'admin' ? 'accepted' : 'pending', user.role === 'customer' ? user.id : null).run();
   await recordActivity(env.DB, { projectId:id, actorUserId:user.id, type:'project_updated' });
 
   try {
@@ -381,18 +396,22 @@ async function createProject(request, env, user) {
     throw e;
   }
 
-  return json({ project: await projectSummary(env.DB, id) }, 201);
+  const notificationWarning = user.role === 'customer' ? await notifyResend(env, {
+    eventType:'project_submitted', projectId:id, projectName:name, customerName:user.display_name,
+    requestedDeliveryDate:project.requested_delivery_date,
+  }) : null;
+  return json({ project: publicProject(await projectSummary(env.DB, id), user), notification_warning:notificationWarning }, 201);
 }
 
 async function updateProject(request, env, user, projectId) {
-  if (user.role !== 'admin') return forbidden();
   const db = env.DB;
-  const exists = await db.prepare('SELECT id FROM projects WHERE id=?').bind(projectId).first();
+  const exists = await db.prepare('SELECT * FROM projects WHERE id=?').bind(projectId).first();
+  if (user.role !== 'admin' && !(exists?.submitted_by === user.id && exists?.acceptance_status === 'pending')) return forbidden();
   if (!exists) return json({ error: 'Project not found.' }, 404);
   const isMultipart = (request.headers.get('content-type') || '').includes('multipart/form-data');
   const form = isMultipart ? await request.formData() : null;
   const body = form ? Object.fromEntries(form) : await readJson(request);
-  const allowed = ['name','project_type','client_reference','details','requested_delivery_date','metal','size_details','supplied_materials','internal_notes'];
+  const allowed = ['name','project_type','client_reference','details','requested_delivery_date','metal','size_details','supplied_materials',...(user.role === 'admin' ? ['internal_notes'] : [])];
   const sets = [];
   const vals = [];
   for (const key of allowed) {
@@ -401,6 +420,7 @@ async function updateProject(request, env, user, projectId) {
       vals.push(body[key] == null ? '' : String(body[key]).trim());
     }
   }
+  if ('name' in body && !String(body.name || '').trim()) return json({ error:'Project name is required.' }, 400);
   const removeIds = parseJsonOr(form?.get('remove_reference_ids') || '[]', null);
   if (!Array.isArray(removeIds)) return json({ error: 'Invalid reference image selection.' }, 400);
   const uniqueRemoveIds = [...new Set(removeIds.map(String))];
@@ -678,6 +698,8 @@ async function recordActivity(db, { projectId, designId=null, actorUserId, type 
 async function serveFile(env, user, fileId) {
   const meta = await env.DB.prepare('SELECT * FROM files WHERE id=?').bind(fileId).first();
   if (!meta) return new Response('Not found', { status: 404 });
+  const project = await env.DB.prepare('SELECT * FROM projects WHERE id=?').bind(meta.project_id).first();
+  if (!project || !canViewProject(project, user)) return new Response('Not found', { status:404 });
   const obj = await env.UPLOADS.get(meta.object_key);
   if (!obj) return new Response('Not found', { status: 404 });
 
@@ -755,6 +777,14 @@ async function notifyResend(env, event) {
 
 function resendNotification(event, projectUrl, customerEmail, internalEmails, env) {
   const common = { PROJECT_NAME: event.projectName, PROJECT_URL: projectUrl };
+  if (event.eventType === 'project_submitted') {
+    return { to:internalEmails, templateId:env.RESEND_TEMPLATE_PROJECT_SUBMITTED_INTERNAL || RESEND_TEMPLATE_IDS.project_submitted,
+      variables:{...common, CUSTOMER_NAME:event.customerName, REQUESTED_DELIVERY_DATE:formatDeliveryDate(event.requestedDeliveryDate)} };
+  }
+  if (event.eventType === 'project_accepted') {
+    return { to:[customerEmail], templateId:env.RESEND_TEMPLATE_PROJECT_ACCEPTED_CUSTOMER || RESEND_TEMPLATE_IDS.project_accepted,
+      variables:{...common, CUSTOMER_NAME:event.customerName} };
+  }
   if (event.eventType === 'design_created') {
     return {
       to: [customerEmail],
@@ -787,6 +817,43 @@ function resendNotification(event, projectUrl, customerEmail, internalEmails, en
     };
   }
   throw new Error(`Unsupported notification event: ${event.eventType}`);
+}
+
+function canViewProject(project, user) {
+  return user.role === 'admin' || project.acceptance_status === 'accepted' || project.submitted_by === user.id;
+}
+function publicProject(project, user) {
+  if (user.role !== 'admin') delete project.internal_notes;
+  return project;
+}
+function formatDeliveryDate(value) {
+  if (!value) return 'Not provided';
+  const date = new Date(`${value}T00:00:00Z`);
+  return Number.isNaN(date.getTime()) ? value : new Intl.DateTimeFormat('en-US', { month:'long', day:'numeric', year:'numeric', timeZone:'UTC' }).format(date);
+}
+async function archiveProject(request, env, user, project) {
+  if (user.role !== 'admin') return forbidden();
+  if (project.acceptance_status !== 'accepted') return json({ error:'Only accepted projects can be archived.' }, 409);
+  const body = await readJson(request);
+  if (typeof body.archived !== 'boolean') return json({ error:'Archived must be true or false.' }, 400);
+  await env.DB.prepare('UPDATE projects SET archived=?,updated_at=? WHERE id=?').bind(body.archived ? 1 : 0,new Date().toISOString(),project.id).run();
+  await recordActivity(env.DB, { projectId:project.id, actorUserId:user.id, type:'project_updated' });
+  return json({ ok:true, archived:body.archived });
+}
+async function decideProject(request, env, user, project) {
+  if (user.role !== 'admin') return forbidden();
+  const body = await readJson(request);
+  if (!['accepted','declined'].includes(body.decision)) return json({ error:'Decision must be accepted or declined.' }, 400);
+  const result = await env.DB.prepare("UPDATE projects SET acceptance_status=?,updated_at=? WHERE id=? AND acceptance_status='pending'")
+    .bind(body.decision,new Date().toISOString(),project.id).run();
+  if (!result.meta?.changes) return json({ error:'This submission has already been decided.' }, 409);
+  await recordActivity(env.DB, { projectId:project.id, actorUserId:user.id, type:'project_updated' });
+  let notificationWarning = null;
+  if (body.decision === 'accepted') {
+    const submitter = await env.DB.prepare('SELECT display_name FROM users WHERE id=?').bind(project.submitted_by).first();
+    notificationWarning = await notifyResend(env, { eventType:'project_accepted', projectId:project.id, projectName:project.name, customerName:submitter?.display_name || 'Doug' });
+  }
+  return json({ ok:true, acceptance_status:body.decision, notification_warning:notificationWarning });
 }
 
 async function projectSummary(db, id) {

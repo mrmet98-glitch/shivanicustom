@@ -70,29 +70,36 @@ async function renderDashboard(){
 }
 
 function renderDashboardContent(){
-  const isAdmin=state.user.role==='admin', completed=state.projects.filter(p=>p.status==='Delivered'), ongoing=state.projects.filter(p=>p.status!=='Delivered'), visible=state.projectList==='completed'?completed:ongoing, availableStatuses=state.projectList==='completed'?['Delivered']:DASHBOARD_STATUSES.filter(s=>s!=='Delivered'), filtered=state.dashboardStatus==='all'?visible:visible.filter(p=>p.status===state.dashboardStatus);
-  app.innerHTML=shell(`<section class="hero"><div><div class="eyebrow">${isAdmin?'Admin workspace':'Customer portal'}</div><h1>${isAdmin?'Custom Project Dashboard':'Your Custom Projects'}</h1><p>${isAdmin?'Create projects, add proposals, manage production status and respond to customer comments.':'Review project details, compare proposals, leave feedback and approve your preferred design.'}</p></div>${isAdmin?'<button id="newProjectBtn" class="btn btn-primary">+ New Project</button>':''}</section>
-    <section class="dashboard-tools" aria-label="Project view controls"><div class="dashboard-toggle-stack"><div class="view-toggle"><button class="btn btn-small ${state.dashboardView==='cards'?'active':''}" data-dashboard-view="cards">Cards</button><button class="btn btn-small ${state.dashboardView==='kanban'?'active':''}" data-dashboard-view="kanban">Timeline View</button></div><div class="project-list-toggle" aria-label="Project list"><button class="btn btn-small ${state.projectList==='ongoing'?'active':''}" data-project-list="ongoing">Ongoing Projects <span>${ongoing.length}</span></button><button class="btn btn-small ${state.projectList==='completed'?'active':''}" data-project-list="completed">Completed Projects <span>${completed.length}</span></button></div></div><div class="field status-filter"><label for="dashboardStatus">Filter by stage</label><select id="dashboardStatus"><option value="all">All stages (${visible.length})</option>${availableStatuses.map(s=>`<option value="${escAttr(s)}" ${state.dashboardStatus===s?'selected':''}>${esc(s)} (${visible.filter(p=>p.status===s).length})</option>`).join('')}</select></div></section>
-    ${visible.length?(state.dashboardView==='kanban'?kanbanView(filtered):filtered.length?`<div class="grid">${filtered.map(projectCard).join('')}</div>`:`<div class="empty">No projects in this stage.</div>`):`<div class="empty">No ${state.projectList} projects.${state.projectList==='ongoing'&&isAdmin?' Create a new project to get started.':''}</div>`}`);
+  const isAdmin=state.user.role==='admin';
+  const accepted=state.projects.filter(p=>p.acceptance_status==='accepted'&&!Number(p.archived));
+  const lists={ongoing:accepted.filter(p=>p.status!=='Delivered'),completed:accepted.filter(p=>p.status==='Delivered'),archived:state.projects.filter(p=>Number(p.archived)),pending:state.projects.filter(p=>p.acceptance_status==='pending'),declined:state.projects.filter(p=>p.acceptance_status==='declined')};
+  const labels={ongoing:'Ongoing Projects',completed:'Completed Projects',archived:'Archived Projects',pending:'Pending Acceptance',declined:'Declined Submissions'};
+  const visible=lists[state.projectList]||lists.ongoing, reviewList=['pending','declined'].includes(state.projectList);
+  const availableStatuses=state.projectList==='completed'?['Delivered']:state.projectList==='ongoing'?DASHBOARD_STATUSES.filter(s=>s!=='Delivered'):DASHBOARD_STATUSES;
+  const filtered=state.dashboardStatus==='all'||reviewList?visible:visible.filter(p=>p.status===state.dashboardStatus);
+  app.innerHTML=shell(`<section class="hero"><div><div class="eyebrow">${isAdmin?'Admin workspace':'Customer portal'}</div><h1>${isAdmin?'Custom Project Dashboard':'Your Custom Projects'}</h1><p>${isAdmin?'Create projects, add proposals, manage production status and respond to customer comments.':'Review project details, compare proposals, leave feedback and approve your preferred design.'}</p></div><button id="newProjectBtn" class="btn btn-primary">${isAdmin?'+ New Project':'+ Submit Project'}</button></section>
+    <section class="dashboard-tools" aria-label="Project view controls"><div class="dashboard-toggle-stack"><div class="view-toggle"><button class="btn btn-small ${state.dashboardView==='cards'?'active':''}" data-dashboard-view="cards">Cards</button><button class="btn btn-small ${state.dashboardView==='kanban'?'active':''}" data-dashboard-view="kanban">Timeline View</button></div><div class="project-list-toggle" aria-label="Project list">${Object.keys(lists).map(key=>`<button class="btn btn-small ${state.projectList===key?'active':''}" data-project-list="${key}">${labels[key]} <span>${lists[key].length}</span></button>`).join('')}</div></div><div class="field status-filter"><label for="dashboardStatus">Filter by stage</label><select id="dashboardStatus" ${reviewList?'disabled':''}><option value="all">${reviewList?'All submissions':'All stages'} (${visible.length})</option>${(reviewList?[]:availableStatuses).map(s=>`<option value="${escAttr(s)}" ${state.dashboardStatus===s?'selected':''}>${esc(s)} (${visible.filter(p=>p.status===s).length})</option>`).join('')}</select></div></section>
+    ${visible.length?(state.dashboardView==='kanban'&&!reviewList?kanbanView(filtered):filtered.length?`<div class="grid">${filtered.map(projectCard).join('')}</div>`:`<div class="empty">No projects in this stage.</div>`):`<div class="empty">No ${state.projectList} projects.${state.projectList==='ongoing'&&isAdmin?' Create a new project to get started.':''}</div>`}`);
   bindTopbar();document.querySelectorAll('[data-project]').forEach(el=>el.onclick=()=>location.hash=`/project/${el.dataset.project}`);
   document.querySelectorAll('[data-dashboard-view]').forEach(el=>el.onclick=()=>{state.dashboardView=el.dataset.dashboardView;renderDashboardContent()});
   document.querySelectorAll('[data-project-list]').forEach(el=>el.onclick=()=>{state.projectList=el.dataset.projectList;state.dashboardStatus='all';renderDashboardContent()});
   document.querySelector('#dashboardStatus').onchange=e=>{state.dashboardStatus=e.target.value;renderDashboardContent()};
-  if(isAdmin) document.querySelector('#newProjectBtn').onclick=openNewProjectModal;
+  document.querySelector('#newProjectBtn').onclick=openNewProjectModal;
 }
 
 function kanbanView(projects){
-  const stages=state.dashboardStatus==='all'?(state.projectList==='completed'?['Delivered']:DASHBOARD_STATUSES.filter(s=>s!=='Delivered')):[state.dashboardStatus];
+  const stages=state.dashboardStatus==='all'?(state.projectList==='completed'?['Delivered']:state.projectList==='archived'?DASHBOARD_STATUSES:DASHBOARD_STATUSES.filter(s=>s!=='Delivered')):[state.dashboardStatus];
   return `<div class="kanban" aria-label="Projects grouped by stage">${stages.map((status,i)=>{const items=projects.filter(p=>p.status===status);return `<section class="kanban-column tone-${statusTone(status)}"><header><span class="kanban-dot"></span><h2>${esc(status)}</h2><strong>${items.length}</strong></header><div class="kanban-items">${items.length?items.map(kanbanCard).join(''):'<div class="kanban-empty">No projects</div>'}</div></section>`}).join('')}</div>`;
 }
 
 function kanbanCard(p){return `<article class="kanban-card" data-project="${p.id}"><h3>${esc(p.name)}</h3><div class="muted">${Number(p.design_count)||0} proposal${Number(p.design_count)===1?'':'s'}</div>${projectNotifications(p)}<div class="kanban-date"><span>Delivery</span><strong>${p.requested_delivery_date?dateOnly(p.requested_delivery_date):'Not set'}</strong></div></article>`}
 
 function projectCard(p){
-  return `<article class="project-card" data-project="${p.id}"><div class="card-top"><div><h3>${esc(p.name)}</h3><div class="muted" style="font-size:12px">Created ${dateFmt(p.created_at)}</div></div><span class="status tone-${statusTone(p.status)}">${esc(p.status)}</span></div>
+  return `<article class="project-card" data-project="${p.id}"><div class="card-top"><div><h3>${esc(p.name)}</h3><div class="muted" style="font-size:12px">Created ${dateFmt(p.created_at)}</div></div><span class="status tone-${statusTone(p.status)}">${esc(projectLabel(p))}</span></div>
     ${projectNotifications(p)}<div class="meta"><div class="meta-item"><span>Proposals</span><strong>${Number(p.design_count)||0}</strong></div><div class="meta-item"><span>Requested Delivery</span><strong>${p.requested_delivery_date?dateOnly(p.requested_delivery_date):'Not set'}</strong></div></div></article>`;
 }
 
+function projectLabel(p){return p.acceptance_status==='pending'?'Pending Acceptance':p.acceptance_status==='declined'?'Declined':Number(p.archived)?'Archived · '+p.status:p.status}
 function statusTone(status){return Math.max(0,DASHBOARD_STATUSES.indexOf(status))}
 function projectNotifications(p){const comments=Number(p.unseen_comment_count)||0,designs=Number(p.unseen_design_count)||0,updates=Number(p.unseen_update_count)||0;if(!comments&&!designs&&!updates)return'';return `<div class="project-notifications" aria-label="New project activity">${comments?`<div><span class="notification-dot"></span><strong>${comments}</strong> new comment${comments===1?'':'s'} to review</div>`:''}${designs?`<div><span class="notification-dot"></span><strong>${designs}</strong> new design${designs===1?'':'s'} to review</div>`:''}${updates?`<div><span class="notification-dot"></span><strong>${updates}</strong> project update${updates===1?'':'s'} to review</div>`:''}</div>`}
 
@@ -100,14 +107,14 @@ async function renderProject(id){
   app.innerHTML=shell(`<div class="loading">Loading project…</div>`);bindTopbar();
   try{
     const r=await api(`/api/projects/${encodeURIComponent(id)}`); state.currentProject=r; state.statuses=r.statuses||[];
-    const p=r.project,isAdmin=state.user.role==='admin',approved=!!p.approved_design_id;
+    const p=r.project,isAdmin=state.user.role==='admin',approved=!!p.approved_design_id,pending=p.acceptance_status==='pending',accepted=p.acceptance_status==='accepted',canEdit=isAdmin||(pending&&p.submitted_by===state.user.id);
     const designs=[...(r.designs||[])].sort((a,b)=>(b.approved||0)-(a.approved||0));
     app.innerHTML=shell(`
       <div class="crumb" id="backDash">← Back to projects</div>
       <div class="project-head"><div><div class="eyebrow">${esc(p.project_type||'Custom Jewelry Project')}</div><h1>${esc(p.name)}</h1><div class="muted">Created ${dateFmt(p.created_at)}${p.client_reference?` · Ref ${esc(p.client_reference)}`:''}</div></div>
-      <div style="display:flex;gap:9px;flex-wrap:wrap">${isAdmin?'<button id="deleteProjectBtn" class="btn btn-danger">Delete Project</button><button id="editProjectBtn" class="btn btn-ghost">Edit Project</button><button id="addDesignBtn" class="btn btn-primary">+ Add Proposal</button>':`<span class="status tone-${statusTone(p.status)}">${esc(p.status)}</span>`}</div></div>
-
-      <section class="panel"><div class="panel-title"><h2>Project Progress</h2>${isAdmin?statusSelect(p):''}</div>${tracker(p.status)}</section>
+      <div class="project-actions">${isAdmin?'<button id="deleteProjectBtn" class="btn btn-danger">Delete Project</button>':''}${!isAdmin?`<span class="status tone-${statusTone(p.status)}">${esc(projectLabel(p))}</span>`:''}${canEdit?'<button id="editProjectBtn" class="btn btn-ghost">Edit Project</button>':''}${isAdmin&&accepted?`<button id="archiveProjectBtn" class="btn btn-ghost">${Number(p.archived)?'Unarchive':'Archive'} Project</button><button id="addDesignBtn" class="btn btn-primary">+ Add Proposal</button>`:''}${isAdmin&&pending?'<button id="declineProjectBtn" class="btn btn-danger">Decline</button><button id="acceptProjectBtn" class="btn btn-primary">Accept Project</button>':''}</div></div>
+      ${!accepted?`<section class="panel"><h2>${pending?'Pending Acceptance':'Submission Declined'}</h2><p>${pending?'This submission will appear on the project dashboard once Saunak or Atit accepts it.':'This submission was declined. The Shivani Gems team will contact you directly with details.'}</p></section>`:Number(p.archived)?'<section class="panel"><h2>Archived Project</h2><p>This project is hidden from the ongoing and completed project lists. An admin can unarchive it at any time.</p></section>':''}
+      ${accepted?`<section class="panel"><div class="panel-title"><h2>Project Progress</h2>${isAdmin?statusSelect(p):''}</div>${tracker(p.status)}</section>`:''}
 
       <section class="panel"><div class="panel-title"><h2>Project Details</h2></div>
         <div class="project-specs">${spec('Metal',p.metal)}${spec('Requested Delivery',p.requested_delivery_date?dateOnly(p.requested_delivery_date):'—')}${spec('Size / Dimensions',p.size_details)}${spec('Project Type',p.project_type)}${spec('Supplied Stones / Materials',p.supplied_materials)}${isAdmin?spec('Internal Notes',p.internal_notes):''}</div>
@@ -116,9 +123,9 @@ async function renderProject(id){
 
       ${(r.reference_files||[]).length?`<section class="panel"><details class="gallery-details"><summary>Reference Images · ${(r.reference_files||[]).length} file${r.reference_files.length===1?'':'s'}</summary><div class="gallery">${r.reference_files.map(f=>imageTag(f,'Reference image')).join('')}</div></details></section>`:''}
 
-      <section class="panel"><div class="panel-title"><h2>Design Proposals</h2><span class="muted">${designs.length} proposal${designs.length===1?'':'s'}</span></div>
+      ${accepted?`<section class="panel"><div class="panel-title"><h2>Design Proposals</h2><span class="muted">${designs.length} proposal${designs.length===1?'':'s'}</span></div>
         ${designs.length?`<div class="design-list">${designs.map((d,i)=>designCard(d,{approvedProject:approved,initialOpen:isAdmin?false:(!approved&&i===0)||d.approved})).join('')}</div>`:`<div class="empty">No proposals have been added yet.</div>`}
-      </section>`);
+      </section>`:''}`);
     bindTopbar(); bindProjectEvents(p,designs);
   }catch(e){ app.innerHTML=shell(`<div class="crumb" onclick="location.hash=''">← Back</div><div class="empty">${esc(e.message)}</div>`);bindTopbar(); }
 }
@@ -140,11 +147,14 @@ function designCard(d,{approvedProject,initialOpen}){
 function bindProjectEvents(project, designs){
   document.querySelector('#backDash').onclick=()=>location.hash='';
   if(state.user.role==='admin'){
-    document.querySelector('#addDesignBtn').onclick=()=>openDesignModal(project.id);
-    document.querySelector('#editProjectBtn').onclick=()=>openEditProjectModal(project);
+    if(document.querySelector('#addDesignBtn')) document.querySelector('#addDesignBtn').onclick=()=>openDesignModal(project.id);
+
     document.querySelector('#deleteProjectBtn').onclick=async()=>{if(!confirm(`Permanently delete “${project.name}” and all of its proposals, comments, and files? This cannot be undone.`))return;const btn=document.querySelector('#deleteProjectBtn');btn.disabled=true;try{const r=await api(`/api/projects/${encodeURIComponent(project.id)}`,{method:'DELETE'});location.hash='';toast(r.storage_warning?'Project deleted, but some stored files could not be cleaned up.':'Project deleted');await renderDashboard()}catch(err){toast(err.message);btn.disabled=false}};
-    document.querySelector('#statusSelect').onchange=async(e)=>{const v=e.target.value;e.target.disabled=true;try{const r=await api(`/api/projects/${project.id}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:v})});toast(notificationMessage('Project status updated',r));renderProject(project.id)}catch(err){toast(err.message)}finally{e.target.disabled=false}};
+    if(document.querySelector('#statusSelect')) document.querySelector('#statusSelect').onchange=async(e)=>{const v=e.target.value;e.target.disabled=true;try{const r=await api(`/api/projects/${project.id}/status`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:v})});toast(notificationMessage('Project status updated',r));renderProject(project.id)}catch(err){toast(err.message)}finally{e.target.disabled=false}};
   }
+  const edit=document.querySelector('#editProjectBtn');if(edit)edit.onclick=()=>openEditProjectModal(project);
+  const archive=document.querySelector('#archiveProjectBtn');if(archive)archive.onclick=async()=>{archive.disabled=true;try{await api(`/api/projects/${project.id}/archive`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({archived:!Number(project.archived)})});toast(Number(project.archived)?'Project unarchived':'Project archived');await renderProject(project.id)}catch(e){toast(e.message);archive.disabled=false}};
+  for(const decision of ['accepted','declined']){const btn=document.querySelector(decision==='accepted'?'#acceptProjectBtn':'#declineProjectBtn');if(btn)btn.onclick=async()=>{if(!confirm(decision==='accepted'?`Accept “${project.name}” and add it to the dashboard?`:`Decline “${project.name}”? No email will be sent; contact Doug directly with your explanation.`))return;document.querySelectorAll('#acceptProjectBtn,#declineProjectBtn').forEach(b=>b.disabled=true);try{const r=await api(`/api/projects/${project.id}/acceptance`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({decision})});toast(notificationMessage(decision==='accepted'?'Project accepted':'Submission declined',r));await renderProject(project.id)}catch(e){toast(e.message);await renderProject(project.id)}};}
   document.querySelectorAll('[data-toggle-design]').forEach(el=>el.onclick=async()=>{
     const id=el.dataset.toggleDesign, box=document.querySelector(`#design-detail-${id}`);
     if(box.dataset.loaded==='1'){box.classList.toggle('hidden');return}
@@ -183,16 +193,17 @@ function bindDesignDetailEvents(d,box){
 }
 
 function openNewProjectModal(){
-  openModal(`<div class="modal-head"><h2>Create New Project</h2><button class="btn btn-ghost btn-small" data-close>Close</button></div><form id="newProjectForm" class="form-grid">
+  const isAdmin=state.user.role==='admin';
+  openModal(`<div class="modal-head"><h2>${isAdmin?'Create New Project':'Submit New Project'}</h2><button class="btn btn-ghost btn-small" data-close>Close</button></div><form id="newProjectForm" class="form-grid">
     ${input('Project Name','name',true)}${input('Project Type','project_type',false,'e.g. Engagement Ring, Pendant, Band')}
     ${input('Client / PO Reference','client_reference',false,'Optional internal/customer reference')}${input('Requested / Expected Delivery','requested_delivery_date',false,'','date')}
     ${input('Metal','metal',false,'Free text — e.g. 14K Yellow Gold')}${input('Size / Dimensions','size_details',false,'e.g. Ring size 7, pendant 18mm')}
     <div class="field span-2"><label>Project Details</label><textarea name="details" placeholder="Full brief, stone specs, design direction, special instructions…"></textarea></div>
     <div class="field span-2"><label>Supplied Stones / Materials</label><textarea name="supplied_materials" placeholder="Anything being supplied by customer or Shivani Gems"></textarea></div>
     <div class="field span-2"><label>Reference Images</label><input type="file" name="reference_images" multiple accept="image/*,.png,.PNG,.jpg,.JPG,.jpeg,.JPEG,.webp,.WEBP"/><div class="helper">Multiple files allowed. Files are stored privately in R2.</div></div>
-    <div class="field span-2"><label>Internal Notes (admin only)</label><textarea name="internal_notes" placeholder="Not visible to customer"></textarea></div>
-    <div class="modal-actions span-2"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary" type="submit">Create Project</button></div></form>`);
-  document.querySelector('#newProjectForm').onsubmit=async e=>{e.preventDefault();const btn=e.currentTarget.querySelector('[type=submit]');btn.disabled=true;try{const r=await api('/api/projects',{method:'POST',body:new FormData(e.currentTarget)});closeModal();toast('Project created');location.hash=`/project/${r.project.id}`}catch(err){toast(err.message);btn.disabled=false}};
+    ${isAdmin?'<div class="field span-2"><label>Internal Notes (admin only)</label><textarea name="internal_notes" placeholder="Not visible to customer"></textarea></div>':''}
+    <div class="modal-actions span-2"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary" type="submit">${isAdmin?'Create Project':'Submit for Acceptance'}</button></div></form>`);
+  document.querySelector('#newProjectForm').onsubmit=async e=>{e.preventDefault();const btn=e.currentTarget.querySelector('[type=submit]');btn.disabled=true;try{const r=await api('/api/projects',{method:'POST',body:new FormData(e.currentTarget)});closeModal();toast(notificationMessage(isAdmin?'Project created':'Project submitted for acceptance',r));state.projectList=isAdmin?'ongoing':'pending';location.hash=`/project/${r.project.id}`}catch(err){toast(err.message);btn.disabled=false}};
 }
 
 function openEditProjectModal(p){
@@ -201,7 +212,7 @@ function openEditProjectModal(p){
     ${input('Project Name','name',true,'','text',p.name)}${input('Project Type','project_type',false,'','text',p.project_type)}${input('Client / PO Reference','client_reference',false,'','text',p.client_reference)}${input('Requested / Expected Delivery','requested_delivery_date',false,'','date',p.requested_delivery_date)}${input('Metal','metal',false,'','text',p.metal)}${input('Size / Dimensions','size_details',false,'','text',p.size_details)}
     ${textarea('Project Details','details',p.details)}${textarea('Supplied Stones / Materials','supplied_materials',p.supplied_materials)}
     <div class="field span-2"><label>Reference Images</label>${refs.length?`<div class="reference-editor">${refs.map(f=>`<label class="reference-edit-item"><img src="/api/files/${f.id}" alt="${escAttr(f.filename||'Reference image')}"><span><input type="checkbox" name="remove_reference_ids" value="${escAttr(f.id)}"> Delete image</span></label>`).join('')}</div>`:'<div class="helper">No reference images currently attached.</div>'}<input type="file" name="reference_images" multiple accept="image/*,.png,.PNG,.jpg,.JPG,.jpeg,.JPEG,.webp,.WEBP"><div class="helper">Add multiple new images, or select existing images to delete when you save.</div></div>
-    ${textarea('Internal Notes (admin only)','internal_notes',p.internal_notes)}
+    ${state.user.role==='admin'?textarea('Internal Notes (admin only)','internal_notes',p.internal_notes):''}
     <div class="modal-actions span-2"><button type="button" class="btn btn-ghost" data-close>Cancel</button><button class="btn btn-primary" type="submit">Save Changes</button></div></form>`);
   document.querySelector('#editProjectForm').onsubmit=async e=>{e.preventDefault();const form=e.currentTarget,formData=new FormData(form),btn=form.querySelector('[type=submit]');formData.set('remove_reference_ids',JSON.stringify(formData.getAll('remove_reference_ids')));btn.disabled=true;try{await api(`/api/projects/${p.id}`,{method:'PATCH',body:formData});closeModal();toast('Project updated');renderProject(p.id)}catch(err){toast(err.message);btn.disabled=false}};
 }
